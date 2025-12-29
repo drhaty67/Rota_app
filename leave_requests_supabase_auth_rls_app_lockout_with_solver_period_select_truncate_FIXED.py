@@ -47,7 +47,7 @@ def overlap(a_start: date, a_end: date, b_start: date, b_end: date) -> bool:
 # -----------------------------
 st.title("Rota Leave Requests")
 st.write(
-    "Supabase Auth + Row Level Security (RLS), with lockout after a rota period is published. "
+    "Please sign up/sign in to enter your leave requests.Leave requests lockout after a rota period is published. "
     "Admins can approve leave, compile leave into the Excel template, and run the rota solver to draft the rota."
 )
 
