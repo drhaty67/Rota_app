@@ -64,7 +64,7 @@ def weekend_bounds(d: date) -> tuple[date, date]:
 # -----------------------------
 st.title("Rota Requests")
 st.write(
-    "Leave requests and preferred-shift requests with Supabase Auth + Row Level Security (RLS). "
+    "Please sign up/sign in to enter your leave requests and preferred shifts. Requests lockout after a rota period is published."
     "Requests are locked once the rota period is published. Rota admins can draft rota variants using the solver."
 )
 
