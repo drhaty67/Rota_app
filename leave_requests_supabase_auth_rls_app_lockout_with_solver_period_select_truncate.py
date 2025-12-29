@@ -329,10 +329,13 @@ st.markdown("---")
 st.markdown("#### Draft rota (compile approved leave → run solver → download solved workbook)")
 
 st.write(
-    "1) Select the rota period you are publishing."
-    "2) Upload your base rota workbook template."
-    "3) The app will write **approved leave** that falls within the selected period into the `Leave` sheet, "
-    "then run the solver. Drafting is only permitted when the selected period is **published**.")
+    """
+1) Select the rota period you are publishing.
+2) Upload your base rota workbook template.
+3) The app will write approved leave that falls within the selected period into the Leave sheet,
+   then run the solver. Drafting is only permitted when the selected period is published.
+"""
+)
 
 # Refresh periods for this section
 periods = fetch_periods()
@@ -372,6 +375,16 @@ else:
         relax_week_gap = st.checkbox("Allow fallback: relax 1-week gap constraint", value=True)
         relax_no_consec_weekends = st.checkbox("Allow fallback: relax no-consecutive-weekends constraint", value=True)
 
+        force_truncate = st.checkbox(
+            "Force draft by truncating leave that partially overlaps the selected period",
+            value=False,
+            help=(
+                "If enabled, approved leave that overlaps the period but extends outside it will be "
+                "clipped to the period boundaries for drafting. The original leave record is not changed."
+            ),
+            key="force_truncate_partial"
+        )
+
         if template is None:
             st.info("Upload the base rota workbook to enable drafting.")
         else:
@@ -380,6 +393,8 @@ else:
 
                 if only_approved:
                     export_df = export_df[export_df["approved"] == True].copy()
+
+                force_truncate = st.session_state.get("force_truncate_partial", False)
 
                 # --- Validate leave alignment to selected period window ---
                 # We include ONLY leave fully inside the window, but we hard-fail if any approved leave overlaps the window
@@ -396,17 +411,6 @@ else:
                         lambda r: (r["start_date"] >= period_start) and (r["end_date"] <= period_end), axis=1
                     )
                     df_partial = df_overlap[~fully_contained].copy()
-
-                    # Optional: force truncation of partial-overlap leave to the selected period window
-                    force_truncate = st.checkbox(
-                        "Force draft by truncating leave that partially overlaps the selected period",
-                        value=False,
-                        help=(
-                            "If enabled, approved leave that overlaps the period but extends outside it will be "
-                            "clipped to the period boundaries for drafting. The original leave record is not changed."
-                        ),
-                        key="force_truncate_partial"
-                    )
 
                     if not df_partial.empty and not force_truncate:
                         st.error(
