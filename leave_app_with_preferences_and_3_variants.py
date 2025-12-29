@@ -575,3 +575,48 @@ else:
                     file_name=f"Rota_Solved_{variant_name.replace(' ', '_').replace('(', '').replace(')', '')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
+```python
+if len(results) >= 2:
+    st.markdown("---")
+    st.subheader("Visual differences between rota variants")
+
+    # Choose baseline and comparator
+    variant_names = [r[0] for r in results]
+    baseline_name = st.selectbox("Baseline variant", variant_names, index=0, key="diff_base")
+    compare_name = st.selectbox("Compare to", variant_names, index=1, key="diff_comp")
+
+    base_bytes = next(b for (n, b, _) in results if n == baseline_name)
+    comp_bytes = next(b for (n, b, _) in results if n == compare_name)
+
+    sheets = common_sheets(base_bytes, comp_bytes)
+    default_sheet = "Rota" if "Rota" in sheets else sheets[0]
+    sheet = st.selectbox("Sheet to compare", sheets, index=sheets.index(default_sheet), key="diff_sheet")
+
+    diffs = diff_sheet(base_bytes, comp_bytes, sheet_name=sheet, max_changes=5000)
+    s = diff_summary(diffs)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Changed cells", s["changed_cells"])
+    c2.metric("Rows affected", s["changed_rows"])
+    c3.metric("Columns affected", s["changed_cols"])
+
+    if diffs.empty:
+        st.success("No differences detected on the selected sheet.")
+    else:
+        with st.expander("Show where differences occur (row/column hotspots)", expanded=True):
+            colA, colB = st.columns(2)
+            with colA:
+                st.caption("Top changed rows")
+                st.dataframe(top_changed_rows(diffs, 30), use_container_width=True, hide_index=True)
+            with colB:
+                st.caption("Top changed columns")
+                st.dataframe(top_changed_cols(diffs, 30), use_container_width=True, hide_index=True)
+
+        with st.expander("Cell-level differences (sample)", expanded=False):
+            st.dataframe(diffs.head(500), use_container_width=True, hide_index=True)
+
+        st.caption("Note: This is a generic cell-level diff. If you want an 'assignment-level' diff (e.g., "
+                   "which consultant changed on which day/shift), confirm the exact output layout of your solved "
+                   "workbook and we can parse it into structured comparisons.")
+```
