@@ -329,13 +329,10 @@ st.markdown("---")
 st.markdown("#### Draft rota (compile approved leave → run solver → download solved workbook)")
 
 st.write(
-    "1) Select the rota period you are publishing.
-"
-    "2) Upload your base rota workbook template.
-"
+    "1) Select the rota period you are publishing."
+    "2) Upload your base rota workbook template."
     "3) The app will write **approved leave** that falls within the selected period into the `Leave` sheet, "
-    "then run the solver. Drafting is only permitted when the selected period is **published**."
-)
+    "then run the solver. Drafting is only permitted when the selected period is **published**.")
 
 # Refresh periods for this section
 periods = fetch_periods()
