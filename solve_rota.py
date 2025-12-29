@@ -229,6 +229,8 @@ def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str
     model.Minimize(sum(devT) + 3*sum(devBH) + 2*sum(devW))
 
     solver = cp_model.CpSolver()
+solver.parameters.random_seed = args.seed
+solver.parameters.randomize_search = True
     solver.parameters.max_time_in_seconds = float(time_limit_s)
     solver.parameters.num_search_workers = 8
 
@@ -248,6 +250,28 @@ def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str
 
 def export_to_excel(input_path: str, output_path: str, sol: Dict):
     wb = load_workbook(input_path)
+# -----------------------------
+# Read preferred_shifts (soft constraints)
+# -----------------------------
+preferred = []
+if 'preferred_shifts' in wb.sheetnames:
+    pws = wb['preferred_shifts']
+    for row in pws.iter_rows(min_row=2, values_only=True):
+        if not row or not row[0]:
+            continue
+        name, sd, ed, kind, shift_type, weight, notes = row
+        try:
+            weight = int(weight) if weight is not None else 3
+        except Exception:
+            weight = 3
+        preferred.append({
+            'name': name,
+            'start_date': sd,
+            'end_date': ed,
+            'shift': shift_type,
+            'weight': weight
+        })
+
     wa = wb["WeekAssignments"]
     rota = wb["Rota"]
     dash = wb["Dashboard"]
@@ -473,3 +497,28 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# -----------------------------
+# PREFERRED SHIFTS OBJECTIVE (SOFT)
+# -----------------------------
+# Assumes decision variables exist for assignments, e.g.:
+#   x[(consultant, date, shift)] = BoolVar
+#
+# For each preferred shift request:
+#   maximize weight * x[(name, d, shift)] for d in [start_date..end_date]
+#
+# Example (pseudo-code):
+# pref_terms = []
+# for p in preferred:
+#     for d in daterange(p['start_date'], p['end_date']):
+#         key = (p['name'], d, p['shift'])
+#         if key in x:
+#             pref_terms.append(p['weight'] * x[key])
+# model.Maximize(sum(pref_terms) + existing_objective)
+#
+# NOTE:
+# If you already minimize penalties, instead add:
+#   model.Minimize(existing_penalty - sum(pref_terms))
+#
+# Tune scaling factor if needed (e.g. p['weight'] * 10).
