@@ -576,7 +576,6 @@ else:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-```python
 if len(results) >= 2:
     st.markdown("---")
     st.subheader("Visual differences between rota variants")
@@ -619,4 +618,4 @@ if len(results) >= 2:
         st.caption("Note: This is a generic cell-level diff. If you want an 'assignment-level' diff (e.g., "
                    "which consultant changed on which day/shift), confirm the exact output layout of your solved "
                    "workbook and we can parse it into structured comparisons.")
-```
+
