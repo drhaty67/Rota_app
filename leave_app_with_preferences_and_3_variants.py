@@ -143,14 +143,20 @@ if "sb_session" not in st.session_state:
 
 with st.sidebar:
     st.header("Sign in")
-    email = st.text_input("Email", value="").strip().lower()
+
+    email = st.text_input("Email").strip().lower()
     password = st.text_input("Password", type="password")
 
     if ALLOWED_EMAIL_DOMAIN and email and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
-        st.warning(f"Email must end with @{ALLOWED_EMAIL_DOMAIN}.")
+        st.warning(f"Email must end with @{ALLOWED_EMAIL_DOMAIN}")
 
     c = base_client()
+
     col1, col2 = st.columns(2)
+
+    # --------------------
+    # Sign in
+    # --------------------
     with col1:
         if st.button("Sign in", use_container_width=True):
             if not email or not password:
@@ -159,39 +165,53 @@ with st.sidebar:
                 st.error("Email domain not permitted.")
             else:
                 try:
-                    res = c.auth.sign_in_with_password({"email": email, "password": password})
-                    st.session_state["sb_session"] = res.session.model_dump() if res.session else None
+                    res = c.auth.sign_in_with_password({
+                        "email": email,
+                        "password": password
+                    })
+                    st.session_state["sb_session"] = (
+                        res.session.model_dump() if res.session else None
+                    )
                     st.rerun()
-                except Exception:
-                    st.error("Sign-in failed. Check credentials and confirmation status.")
+                except Exception as e:
+                    st.error("Sign-in failed. Check credentials or email confirmation.")
+                    st.exception(e)
+
+    # --------------------
+    # Sign up
+    # --------------------
     with col2:
         if st.button("Sign up", use_container_width=True):
-    if not email or not password:
-        st.error("Enter email and password.")
-    elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
-        st.error("Email domain not permitted.")
-    else:
-        try:
-            c.auth.sign_up({
-                "email": email,
-                "password": password,
-                "options": {
-                    "email_redirect_to": "https://your-app.streamlit.app"
-                }
-            })
-            st.success(
-                "Sign-up created successfully.\n\n"
-                "Please check your email and click the confirmation link to activate your account."
-            )
-        except Exception as e:
-            st.error("Sign-up failed. Email may already exist or password is too weak.")
-            st.exception(e)
+            if not email or not password:
+                st.error("Enter email and password.")
+            elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
+                st.error("Email domain not permitted.")
+            else:
+                try:
+                    c.auth.sign_up({
+                        "email": email,
+                        "password": password,
+                        "options": {
+                            "email_redirect_to": "https://YOUR-APP-NAME.streamlit.app"
+                        }
+                    })
+                    st.success(
+                        "Sign-up created successfully.\n\n"
+                        "Please check your email and click the confirmation link "
+                        "to activate your account."
+                    )
+                except Exception as e:
+                    st.error("Sign-up failed. Email may already exist or password is too weak.")
+                    st.exception(e)
 
-
-    if st.session_state["sb_session"]:
+    # --------------------
+    # Sign out
+    # --------------------
+    if st.session_state.get("sb_session"):
         if st.button("Sign out", use_container_width=True):
             st.session_state["sb_session"] = None
             st.rerun()
+
 
 sess = st.session_state["sb_session"]
 if not sess:
