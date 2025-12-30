@@ -143,7 +143,17 @@ with st.sidebar:
 # Periods
 # -----------------------------
 def fetch_periods() -> pd.DataFrame:
-    resp = db.table("rota_periods").select("*").order("start_date").execute()
+    try:
+        resp = db.table("rota_periods").select("*").order("start_date").execute()
+    except Exception as e:
+        st.error("Cannot read rota periods from Supabase (rota_periods).")
+        st.info(
+            "Fix: run the Supabase migration for rota_periods (create table + RLS policies) "
+            "and ensure authenticated has SELECT."
+        )
+        st.exception(e)
+        return pd.DataFrame()
+
     dfp = pd.DataFrame(resp.data or [])
     if not dfp.empty:
         dfp["start_date"] = pd.to_datetime(dfp["start_date"]).dt.date
