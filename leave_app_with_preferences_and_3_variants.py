@@ -106,7 +106,7 @@ with st.sidebar:
             else:
                 try:
                     _ = c.auth.sign_up({"email": email, "password": password})
-                    st.success("Sign-up created. If email confirmation is enabled, confirm via email then sign in.")
+                    st.success("Sign-up created. Confirm via email then sign in.")
                 except Exception:
                     st.error("Sign-up failed. Email may already exist or password may be too weak.")
 
