@@ -192,7 +192,7 @@ with st.sidebar:
                         "email": email,
                         "password": password,
                         "options": {
-                            "email_redirect_to": "https://YOUR-APP-NAME.streamlit.app"
+                            "email_redirect_to": "https://rotaicu.streamlit.app"
                         }
                     })
                     st.success(
