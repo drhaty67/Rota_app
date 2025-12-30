@@ -8,6 +8,28 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# --- Supabase email confirmation / magic link handler ---
+query_params = st.query_params
+
+if "access_token" in query_params and "refresh_token" in query_params:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        session = supabase.auth.set_session(
+            query_params["access_token"],
+            query_params["refresh_token"]
+        )
+
+        if session and session.session:
+            st.session_state["sb_session"] = session.session.model_dump()
+
+        # Clean URL and redirect to app root (login/home)
+        st.query_params.clear()
+        st.success("Email confirmed. You are now signed in.")
+        st.rerun()
+
+    except Exception as e:
+        st.error("Email confirmation failed. Please try signing in.")
+
 st.set_page_config(page_title="Rota Requests + Solver", layout="wide")
 # Persist solver results across Streamlit reruns (for variant comparison UI)
 if "draft_results" not in st.session_state:
@@ -62,6 +84,51 @@ def weekend_bounds(d: date) -> tuple[date, date]:
     sun = ws + timedelta(days=6)
     return sat, sun
 
+# ---------------------------------------------------------
+# Supabase email confirmation / magic-link success handler
+# ---------------------------------------------------------
+query_params = st.query_params
+
+if "access_token" in query_params and "refresh_token" in query_params:
+    try:
+        supabase_tmp = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+        session = supabase_tmp.auth.set_session(
+            query_params["access_token"],
+            query_params["refresh_token"]
+        )
+
+        if session and session.session:
+            st.session_state["sb_session"] = session.session.model_dump()
+
+            # --- Custom confirmation success page ---
+            st.markdown("## ✅ Email confirmed successfully")
+            st.success(
+                "Thank you for confirming your email address.\n\n"
+                "You can now:\n"
+                "- Request annual or study leave\n"
+                "- Submit preferred shifts (weeks, weekends, or shift types)\n"
+                "- Track the status of your requests\n\n"
+                "Please use the menu on the left to continue."
+            )
+
+            st.info("You will be redirected automatically in a moment…")
+
+            # Clean the URL so tokens are not reused
+            st.query_params.clear()
+
+            # Short pause so user can read the message
+            import time
+            time.sleep(2)
+
+            st.rerun()
+
+    except Exception:
+        st.error(
+            "Your email confirmation link could not be processed.\n\n"
+            "Please return to the login page and sign in manually."
+        )
+
 # -----------------------------
 # Auth UI
 # -----------------------------
@@ -105,8 +172,9 @@ with st.sidebar:
                 st.error("Email domain not permitted.")
             else:
                 try:
-                    _ = c.auth.sign_up({"email": email, "password": password})
-                    st.success("Sign-up created. Confirm via email then sign in.")
+                    _ = c.auth.sign_up({ "email": email,"password": password,
+    "options": { "email_redirect_to": "https://rotaicu.streamlit.app"}})
+                st.success("Sign-up created. Confirm via email then sign in.")
                 except Exception:
                     st.error("Sign-up failed. Email may already exist or password may be too weak.")
 
