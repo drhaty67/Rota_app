@@ -9,6 +9,9 @@ import tempfile
 from pathlib import Path
 
 st.set_page_config(page_title="Rota Requests + Solver", layout="wide")
+# Persist solver results across Streamlit reruns (for variant comparison UI)
+if "draft_results" not in st.session_state:
+    st.session_state["draft_results"] = []
 
 # -----------------------------
 # Secrets
@@ -578,6 +581,7 @@ else:
                 st.error("No variants could be produced. Check solver logs above. Ensure `solve_rota.py` supports `--seed` and reads `preferred_shifts`.")
                 st.stop()
 
+            st.session_state["draft_results"] = results
             st.success(f"Produced {len(results)} rota variant(s). Download below.")
             for variant_name, data_bytes, used_label in results:
                 st.download_button(
@@ -586,6 +590,8 @@ else:
                     file_name=f"Rota_Solved_{variant_name.replace(' ', '_').replace('(', '').replace(')', '')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
+
+results = st.session_state.get("draft_results", [])
 
 if len(results) >= 2:
     st.markdown("---")
