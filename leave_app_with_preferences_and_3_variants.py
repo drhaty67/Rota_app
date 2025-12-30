@@ -127,7 +127,8 @@ db = authed_client(access_token)
 # -----------------------------
 def is_rota_admin() -> bool:
     try:
-        r = db.table("rota_admins").select("user_id").limit(1).execute()
+        r = db.table("rota_admins").select("user_id").eq("user_id", user_id).execute()
+        is_admin = len(r.data or []) > 0
         return bool(r.data)
     except Exception:
         return False
