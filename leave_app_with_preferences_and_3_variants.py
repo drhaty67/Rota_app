@@ -174,9 +174,13 @@ with st.sidebar:
                 try:
                     _ = c.auth.sign_up({ "email": email,"password": password,
     "options": { "email_redirect_to": "https://rotaicu.streamlit.app"}})
-                st.success("Sign-up created. Confirm via email then sign in.")
-                except Exception:
-                    st.error("Sign-up failed. Email may already exist or password may be too weak.")
+                st.success(
+                "Sign-up created successfully.\n\n"
+                "Please check your email and click the confirmation link to activate your account."
+            )
+        except Exception as e:
+            st.error("Sign-up failed. Email may already exist or password is too weak.")
+            st.exception(e)
 
     if st.session_state["sb_session"]:
         if st.button("Sign out", use_container_width=True):
