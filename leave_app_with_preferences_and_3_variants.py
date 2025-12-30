@@ -166,26 +166,24 @@ with st.sidebar:
                     st.error("Sign-in failed. Check credentials and confirmation status.")
     with col2:
         if st.button("Sign up", use_container_width=True):
-    if not email or not password:
-        st.error("Enter email and password.")
-    elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
-        st.error("Email domain not permitted.")
-    else:
-        try:
-            _ = c.auth.sign_up({
-                "email": email,
-                "password": password,
-                "options": {
-                    "email_redirect_to": "https://rotaicu.streamlit.app"
-                }
-            })
-            st.success(
+             if not email or not password:
+                 st.error("Enter email and password.")
+             elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
+                  st.error("Email domain not permitted.")
+             else:
+                 try:
+                     _ = c.auth.sign_up({
+                     "email": email,
+                     "password": password,
+                     "options": {
+                     "email_redirect_to": "https://rotaicu.streamlit.app"}})
+             st.success(
                 "Sign-up created successfully.\n\n"
-                "Please check your email and click the confirmation link to activate your account."
-            )
-        except Exception as e:
-            st.error("Sign-up failed. Email may already exist or password is too weak.")
-            st.exception(e)
+                "Please check your email and click the confirmation link to activate your account.")
+            
+                except Exception as e:
+                     st.error("Sign-up failed. Email may already exist or password is too weak.")
+                     st.exception(e)
 
     if st.session_state["sb_session"]:
         if st.button("Sign out", use_container_width=True):
