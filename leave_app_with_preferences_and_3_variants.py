@@ -135,7 +135,7 @@ if "access_token" in query_params and "refresh_token" in query_params:
 st.title("Rota Requests")
 st.write(
     "Please sign up/sign in to enter your leave requests and preferred shifts. Requests lockout after a rota period is published."
-    "Requests are locked once the rota period is published. Rota admins can draft rota variants using the solver."
+    "Rota admins cab draft rota once rota period published."
 )
 
 if "sb_session" not in st.session_state:
@@ -313,7 +313,7 @@ prefs_df = fetch_prefs()
 # -----------------------------
 # 1) Leave request (same as before)
 # -----------------------------
-st.subheader("1) Submit a leave request")
+st.subheader("1) Submit a CLW approved leave request")
 with st.form("leave_add"):
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
@@ -365,7 +365,7 @@ else:
 # -----------------------------
 # 2) Preferred shifts request
 # -----------------------------
-st.subheader("3) Submit a preferred-shift request")
+st.subheader("3) Submit one preferred-shift request (note you are only allowed to submit one request")
 st.caption("Examples: request a particular week, a weekend, or a shift type (A/B/D) on specific dates.")
 
 with st.form("pref_add"):
