@@ -84,6 +84,13 @@ def weekend_bounds(d: date) -> tuple[date, date]:
     sun = ws + timedelta(days=6)
     return sat, sun
 
+def publish_due_periods():
+    try:
+        # calls the SECURITY DEFINER function you added in SQL
+        db.rpc("publish_due_periods", {}).execute()
+    except Exception:
+        pass  # safe to ignore; RLS already enforces lockout
+
 # ---------------------------------------------------------
 # Supabase email confirmation / magic-link success handler
 # ---------------------------------------------------------
@@ -128,6 +135,9 @@ if "access_token" in query_params and "refresh_token" in query_params:
             "Your email confirmation link could not be processed.\n\n"
             "Please return to the login page and sign in manually."
         )
+
+# Keep rota_periods in sync with leave lock dates
+publish_due_periods()
 
 # -----------------------------
 # Auth UI
@@ -240,6 +250,50 @@ with st.sidebar:
     st.markdown("---")
     st.write(f"Signed in as: {user_email}")
     st.write("Role: Rota admin" if is_admin else "Role: Consultant")
+
+if is_admin:
+    st.markdown("## 🗓️ Rota periods & leave lock")
+
+    periods = fetch_periods().sort_values("start_date")
+
+    st.dataframe(
+        periods[["name", "start_date", "end_date", "leave_lock_at", "is_published"]],
+        width="stretch",
+        hide_index=True
+    )
+
+    st.markdown("### Add / update rota period")
+
+    with st.form("rota_period_form"):
+        name = st.text_input("Period name (e.g. Nov 2025 – May 2026)")
+        start_date = st.date_input("Start date")
+        end_date = st.date_input("End date")
+        leave_lock_at = st.datetime_input(
+            "Leave lock date & time",
+            help="After this point, consultants cannot enter or modify leave or preferred shifts."
+        )
+
+        submit = st.form_submit_button("Save rota period")
+
+        if submit:
+            try:
+                db.table("rota_periods").upsert(
+                    {
+                        "name": name,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "leave_lock_at": leave_lock_at,
+                    },
+                    on_conflict="name"
+                ).execute()
+
+                st.success("Rota period saved.")
+                publish_due_periods()
+                st.rerun()
+
+            except Exception as e:
+                st.error("Failed to save rota period.")
+                st.exception(e)    
 
 # -----------------------------
 # Periods
