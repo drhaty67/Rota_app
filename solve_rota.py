@@ -26,6 +26,28 @@ class Consultant:
     eligible_a: bool
     eligible_d: bool
     active: bool
+    unique: str = \"\"
+    unique_tags: frozenset[str] = frozenset()
+    weekend_wte_cap: bool = False
+    no_weekend: bool = False
+    no_weekendab: bool = False
+    no_d: bool = False
+
+
+def _parse_unique_tags(val) -> frozenset[str]:
+    if val is None:
+        return frozenset()
+    s = str(val).strip().lower()
+    if not s:
+        return frozenset()
+    # Normalize common separators
+    s = s.replace(";", ",").replace("\n", ",")
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    return frozenset(parts)
+
+def _has_tag(tags: frozenset[str], needle: str) -> bool:
+    needle = needle.strip().lower()
+    return any(needle in t for t in tags)
 
 def daterange(d0: date, d1: date) -> List[date]:
     out = []
@@ -54,6 +76,7 @@ def read_inputs(path: str) -> Tuple[date, date, List[Consultant], Dict[str, Set[
         nm = cws[f"A{r}"].value
         if not nm:
             continue
+        tags = _parse_unique_tags(cws[f"H{r}"].value)
         consultants.append(Consultant(
             name=str(nm),
             cardiac=bool(cws[f"B{r}"].value),
@@ -61,6 +84,12 @@ def read_inputs(path: str) -> Tuple[date, date, List[Consultant], Dict[str, Set[
             eligible_a=bool(cws[f"D{r}"].value),
             eligible_d=bool(cws[f"E{r}"].value),
             active=bool(cws[f"F{r}"].value),
+            unique=str(cws[f"H{r}"].value or ""),
+            unique_tags=tags,
+            weekend_wte_cap=_has_tag(tags, "weekendab = 1 wte"),
+            no_weekendab=_has_tag(tags, "no weekendab"),
+            no_weekend=_has_tag(tags, "no weekend"),
+            no_d=_has_tag(tags, "no d"),
         ))
     consultants = [c for c in consultants if c.active]
     if not consultants:
@@ -107,7 +136,12 @@ def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str
     cardiac = [c.cardiac for c in consultants]
     wte = [c.wte for c in consultants]
     eligible_a = [c.eligible_a for c in consultants]
-    eligible_d = [c.eligible_d for c in consultants]
+    eligible_d = [c.eligible_d and (not c.no_d) for c in consultants]
+    # Weekend eligibility: if no_weekend tag present, disallow all weekend blocks; if no_weekendab tag present, disallow WeekendAB only.
+    weekend_allowed = [not c.no_weekend for c in consultants]
+    weekendab_allowed = [not (c.no_weekend or c.no_weekendab) for c in consultants]
+    # Weekend WTE for fairness: if tagged 'WeekendAB = 1 WTE', cap WTE at 1.0 for weekend distribution.
+    weekend_wte = [min(c.wte, 1.0) if c.weekend_wte_cap else c.wte for c in consultants]
 
     model = cp_model.CpModel()
     block_types = ["AB1","AB2","DMonThu","WeekendAB","WeekendMixed"]
@@ -123,6 +157,16 @@ def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str
                 for b in ("AB1","AB2","WeekendAB","WeekendMixed"):
                     model.Add(x[(w_i,b,i)] == 0)
             if not eligible_d[i]:
+                for b in ("DMonThu","WeekendMixed"):
+                    model.Add(x[(w_i,b,i)] == 0)
+            # Weekend restrictions from unique tags
+            if not weekend_allowed[i]:
+                for b in ("WeekendAB","WeekendMixed"):
+                    model.Add(x[(w_i,b,i)] == 0)
+            elif not weekendab_allowed[i]:
+                model.Add(x[(w_i,"WeekendAB",i)] == 0)
+            # No-D restriction from unique tags (redundant with eligible_d but kept explicit)
+            if consultants[i].no_d:
                 for b in ("DMonThu","WeekendMixed"):
                     model.Add(x[(w_i,b,i)] == 0)
 
@@ -219,7 +263,14 @@ def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str
     for i in range(N):
         model.Add(weekend_blocks[i] == sum(x[(w_i,"WeekendAB",i)] + x[(w_i,"WeekendMixed",i)] for w_i in range(len(weeks))))
     weekend_all = 2 * len(weeks)
-    expected_w = [int(round(weekend_all * (wte[i]/sum_wte) * SCALE)) for i in range(N)]
+    # Distribute weekend burden only among those eligible for weekend blocks.
+    sum_wte_weekend = sum(weekend_wte[i] for i in range(N) if weekend_allowed[i])
+    sum_wte_weekend = sum_wte_weekend if sum_wte_weekend > 0 else 1.0
+    expected_w = [0 for _ in range(N)]
+    for i in range(N):
+        if weekend_allowed[i]:
+            expected_w[i] = int(round(weekend_all * (weekend_wte[i]/sum_wte_weekend) * SCALE))
+
     wkS = [model.NewIntVar(0, 10_000_000, f"wkS_{i}") for i in range(N)]
     devW = [model.NewIntVar(0, 10_000_000, f"devW_{i}") for i in range(N)]
     for i in range(N):
