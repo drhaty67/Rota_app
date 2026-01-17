@@ -145,7 +145,7 @@ publish_due_periods()
 st.title("Rota Requests")
 st.write(
     "Please sign up/sign in to enter your leave requests and preferred shifts. Requests lockout after a rota period is published."
-    "Rota admins cab draft rota once rota period published."
+    "Rota admins can draft rota once rota period published."
 )
 
 if "sb_session" not in st.session_state:
