@@ -142,10 +142,10 @@ publish_due_periods()
 # -----------------------------
 # Auth UI
 # -----------------------------
-st.title("Rota Requests")
+st.title("Rota Requests Glenfield AICU")
 st.write(
     "Please sign up/sign in to enter your leave requests and preferred shifts. Requests lockout after a rota period is published."
-    "Rota admins cab draft rota once rota period published."
+    "Rota admins will draft rota once rota period published. Please report any problems with this app to hakeem.yusuff1@nhs.net"
 )
 
 if "sb_session" not in st.session_state:
