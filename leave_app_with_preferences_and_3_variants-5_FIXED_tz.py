@@ -284,15 +284,6 @@ def any_published_overlap(s: date, e: date) -> bool:
         return False
     return any(overlap(s, e, r["start_date"], r["end_date"]) for _, r in pubs.iterrows())
 
-st.subheader("Published rota periods")
-if periods.empty:
-    st.info("No rota periods configured yet.")
-else:
-    st.dataframe(periods[["id","name","start_date","end_date","is_published","published_at"]],
-                 use_container_width=True, hide_index=True)
-    if not periods[periods["is_published"] == True].empty:
-        st.caption("Requests overlapping published periods are locked for consultants.")
-
 # -----------------------------
 # Countdown banner: next leave lock
 # -----------------------------
