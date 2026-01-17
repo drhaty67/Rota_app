@@ -84,6 +84,13 @@ def weekend_bounds(d: date) -> tuple[date, date]:
     sun = ws + timedelta(days=6)
     return sat, sun
 
+def publish_due_periods():
+    try:
+        # calls the SECURITY DEFINER function you added in SQL
+        db.rpc("publish_due_periods", {}).execute()
+    except Exception:
+        pass  # safe to ignore; RLS already enforces lockout
+
 # ---------------------------------------------------------
 # Supabase email confirmation / magic-link success handler
 # ---------------------------------------------------------
@@ -129,13 +136,16 @@ if "access_token" in query_params and "refresh_token" in query_params:
             "Please return to the login page and sign in manually."
         )
 
+# Keep rota_periods in sync with leave lock dates
+publish_due_periods()
+
 # -----------------------------
 # Auth UI
 # -----------------------------
 st.title("Rota Requests")
 st.write(
     "Please sign up/sign in to enter your leave requests and preferred shifts. Requests lockout after a rota period is published."
-    "Requests are locked once the rota period is published. Rota admins can draft rota variants using the solver."
+    "Rota admins cab draft rota once rota period published."
 )
 
 if "sb_session" not in st.session_state:
@@ -239,7 +249,7 @@ is_admin = is_rota_admin()
 with st.sidebar:
     st.markdown("---")
     st.write(f"Signed in as: {user_email}")
-    st.write("Role: Rota admin" if is_admin else "Role: Consultant")
+    st.write("Role: Rota admin" if is_admin else "Role: Consultant")   
 
 # -----------------------------
 # Periods
@@ -274,15 +284,53 @@ def any_published_overlap(s: date, e: date) -> bool:
         return False
     return any(overlap(s, e, r["start_date"], r["end_date"]) for _, r in pubs.iterrows())
 
+# -----------------------------
+# Countdown banner: next leave lock
+# -----------------------------
+def next_lock_banner(periods_df: pd.DataFrame, is_admin_user: bool):
+    if periods_df is None or periods_df.empty or "leave_lock_at" not in periods_df.columns:
+        return
+
+    now = pd.Timestamp.now(tz="UTC")
+
+    df = periods_df.copy()
+    if "is_published" in df.columns:
+        df = df[df["is_published"] == False]
+    df = df[df["leave_lock_at"].notna()]
+    df = df[df["leave_lock_at"] > now]
+
+    if df.empty:
+        return
+
+    df = df.sort_values("leave_lock_at")
+    row = df.iloc[0]
+    lock_at = row["leave_lock_at"].to_pydatetime()
+    delta = lock_at - now.to_pydatetime()
+
+    days = delta.days
+    hours = (delta.seconds // 3600)
+    minutes = (delta.seconds % 3600) // 60
+
+    label = (
+        f"Leave and preferred-shift requests close for **{row.get('name','rota period')}** in "
+        f"**{days}d {hours}h {minutes}m** (at {lock_at:%Y-%m-%d %H:%M UTC})."
+    )
+    if is_admin_user:
+        st.warning(label + " As an admin you can still manage periods, approvals, and drafting.")
+    else:
+        st.warning(label + " Please submit any changes before the deadline.")
+
 st.subheader("Published rota periods")
+next_lock_banner(periods, is_admin)
+
 if periods.empty:
     st.info("No rota periods configured yet.")
 else:
     st.dataframe(periods[["id","name","start_date","end_date","is_published","published_at"]],
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
     if not periods[periods["is_published"] == True].empty:
         st.caption("Requests overlapping published periods are locked for consultants.")
-
+        
 # -----------------------------
 # Data access
 # -----------------------------
@@ -313,7 +361,7 @@ prefs_df = fetch_prefs()
 # -----------------------------
 # 1) Leave request (same as before)
 # -----------------------------
-st.subheader("1) Submit a leave request")
+st.subheader("1) Submit a CLW approved leave request")
 with st.form("leave_add"):
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
@@ -365,7 +413,7 @@ else:
 # -----------------------------
 # 2) Preferred shifts request
 # -----------------------------
-st.subheader("3) Submit a preferred-shift request")
+st.subheader("3) Submit one preferred-shift request (note you are only allowed to submit one request")
 st.caption("Examples: request a particular week, a weekend, or a shift type (A/B/D) on specific dates.")
 
 with st.form("pref_add"):
@@ -437,6 +485,99 @@ st.subheader("Admin actions")
 if not is_admin:
     st.info("Admin actions are available to rota administrators only.")
     st.stop()
+
+if is_admin:
+    st.markdown("## 🗓️ Rota periods & leave lock")
+
+    periods = fetch_periods()
+    if periods is None or periods.empty or "start_date" not in periods.columns:
+        st.info("No rota periods available (or missing required columns). Create a rota period below.")
+        periods = pd.DataFrame(columns=["id","name","start_date","end_date","leave_lock_at","is_published","published_at"])
+    else:
+        periods = periods.sort_values("start_date")
+
+    st.dataframe(
+        periods[[c for c in ["name","start_date","end_date","leave_lock_at","is_published"] if c in periods.columns]],
+        width="stretch",
+        hide_index=True
+    )  
+# -----------------------------
+# Admin: Rota period management (lock date + finalise)
+# -----------------------------
+st.markdown("### Rota periods (admin)")
+
+periods_admin = fetch_periods()
+if periods_admin.empty:
+    st.info("No rota periods configured yet.")
+else:
+    cols_show = ["id","name","start_date","end_date"]
+    if "leave_lock_at" in periods_admin.columns:
+        cols_show += ["leave_lock_at"]
+    cols_show += ["is_published","published_at"]
+    if "is_finalized" in periods_admin.columns:
+        cols_show += ["is_finalized"]
+    if "finalized_at" in periods_admin.columns:
+        cols_show += ["finalized_at"]
+    st.dataframe(periods_admin[cols_show], width="stretch", hide_index=True)
+
+st.markdown("#### Create / update rota period")
+with st.form("rota_period_upsert"):
+    name_p = st.text_input("Period name (e.g., Nov 2025 – May 2026)")
+    start_p = st.date_input("Start date", value=pd.Timestamp.utcnow().date())
+    end_p = st.date_input("End date", value=(pd.Timestamp.utcnow() + pd.Timedelta(days=180)).date())
+    lock_p = st.datetime_input(
+        "Leave lock (UTC)",
+        value=(pd.Timestamp.utcnow() + pd.Timedelta(days=14)).to_pydatetime(),
+        help="After this time, consultants can no longer add/edit/delete leave or preferred shifts for this period."
+    )
+    save_p = st.form_submit_button("Save period")
+
+if save_p:
+    try:
+        payload = {
+            "name": name_p,
+            "start_date": start_p.isoformat(),
+            "end_date": end_p.isoformat(),
+            "leave_lock_at": pd.Timestamp(lock_p, tz="UTC").isoformat(),
+        }
+        db.table("rota_periods").upsert(payload, on_conflict="name").execute()
+        publish_due_periods()
+        st.success("Saved.")
+        st.rerun()
+    except Exception as e:
+        st.error("Failed to save rota period.")
+        st.exception(e)
+
+st.markdown("#### Finalise rota period (locks leave + preferences immediately)")
+periods_admin2 = fetch_periods()
+if periods_admin2 is None or periods_admin2.empty or "start_date" not in periods_admin2.columns:
+    periods_admin2 = pd.DataFrame()
+else:
+    periods_admin2 = periods_admin2.sort_values("start_date", ascending=False)
+if not periods_admin2.empty:
+    periods_admin2["label"] = periods_admin2.apply(
+        lambda r: f"{r['name']} ({r['start_date']} → {r['end_date']}) — {'PUBLISHED' if r['is_published'] else 'unpublished'}",
+        axis=1
+    )
+    sel = st.selectbox("Select period to finalise", periods_admin2["label"].tolist(), key="finalise_sel")
+    row = periods_admin2[periods_admin2["label"] == sel].iloc[0]
+
+    st.caption("Finalising sets leave_lock_at to now, marks the period published, and records finalisation (if enabled).")
+    if st.button("Finalise rota period now", type="primary"):
+        try:
+            now_iso = pd.Timestamp.now(tz="UTC").isoformat()
+            update_payload = {"leave_lock_at": now_iso, "is_published": True, "published_at": now_iso}
+            if "is_finalized" in periods_admin2.columns:
+                update_payload["is_finalized"] = True
+            if "finalized_at" in periods_admin2.columns:
+                update_payload["finalized_at"] = now_iso
+
+            db.table("rota_periods").update(update_payload).eq("id", row["id"]).execute()
+            st.success("Rota period finalised. Consultants are now locked out of leave and preferences for this period.")
+            st.rerun()
+        except Exception as e:
+            st.error("Failed to finalise rota period.")
+            st.exception(e)
 
 # Approve leave (admin-only)
 st.markdown("### Leave approvals")
