@@ -249,51 +249,7 @@ is_admin = is_rota_admin()
 with st.sidebar:
     st.markdown("---")
     st.write(f"Signed in as: {user_email}")
-    st.write("Role: Rota admin" if is_admin else "Role: Consultant")
-
-if is_admin:
-    st.markdown("## 🗓️ Rota periods & leave lock")
-
-    periods = fetch_periods().sort_values("start_date")
-
-    st.dataframe(
-        periods[["name", "start_date", "end_date", "leave_lock_at", "is_published"]],
-        width="stretch",
-        hide_index=True
-    )
-
-    st.markdown("### Add / update rota period")
-
-    with st.form("rota_period_form"):
-        name = st.text_input("Period name (e.g. Nov 2025 – May 2026)")
-        start_date = st.date_input("Start date")
-        end_date = st.date_input("End date")
-        leave_lock_at = st.datetime_input(
-            "Leave lock date & time",
-            help="After this point, consultants cannot enter or modify leave or preferred shifts."
-        )
-
-        submit = st.form_submit_button("Save rota period")
-
-        if submit:
-            try:
-                db.table("rota_periods").upsert(
-                    {
-                        "name": name,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "leave_lock_at": leave_lock_at,
-                    },
-                    on_conflict="name"
-                ).execute()
-
-                st.success("Rota period saved.")
-                publish_due_periods()
-                st.rerun()
-
-            except Exception as e:
-                st.error("Failed to save rota period.")
-                st.exception(e)    
+    st.write("Role: Rota admin" if is_admin else "Role: Consultant")   
 
 # -----------------------------
 # Periods
@@ -538,6 +494,50 @@ st.subheader("Admin actions")
 if not is_admin:
     st.info("Admin actions are available to rota administrators only.")
     st.stop()
+
+if is_admin:
+    st.markdown("## 🗓️ Rota periods & leave lock")
+
+    periods = fetch_periods().sort_values("start_date")
+
+    st.dataframe(
+        periods[["name", "start_date", "end_date", "leave_lock_at", "is_published"]],
+        width="stretch",
+        hide_index=True
+    )
+
+    st.markdown("### Add / update rota period")
+
+    with st.form("rota_period_form"):
+        name = st.text_input("Period name (e.g. Nov 2025 – May 2026)")
+        start_date = st.date_input("Start date")
+        end_date = st.date_input("End date")
+        leave_lock_at = st.datetime_input(
+            "Leave lock date & time",
+            help="After this point, consultants cannot enter or modify leave or preferred shifts."
+        )
+
+        submit = st.form_submit_button("Save rota period")
+
+        if submit:
+            try:
+                db.table("rota_periods").upsert(
+                    {
+                        "name": name,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "leave_lock_at": leave_lock_at,
+                    },
+                    on_conflict="name"
+                ).execute()
+
+                st.success("Rota period saved.")
+                publish_due_periods()
+                st.rerun()
+
+            except Exception as e:
+                st.error("Failed to save rota period.")
+                st.exception(e) 
     
 # -----------------------------
 # Admin: Rota period management (lock date + finalise)
