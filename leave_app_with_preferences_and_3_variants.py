@@ -297,14 +297,16 @@ def next_lock_banner(periods_df: pd.DataFrame, is_admin_user: bool):
     if "is_published" in df.columns:
         df = df[df["is_published"] == False]
     df = df[df["leave_lock_at"].notna()]
-    df = df[df["leave_lock_at"] > now]
-
+        # Coerce leave_lock_at to tz-aware datetime (Supabase often returns it as string)
+    df["leave_lock_at_ts"] = pd.to_datetime(df["leave_lock_at"], errors="coerce", utc=True)
+    df = df[df["leave_lock_at_ts"].notna()]
+    df = df[df["leave_lock_at_ts"] > now]
     if df.empty:
         return
 
-    df = df.sort_values("leave_lock_at")
+    df = df.sort_values("leave_lock_at_ts")
     row = df.iloc[0]
-    lock_at = row["leave_lock_at"].to_pydatetime()
+    lock_at = row["leave_lock_at_ts"].to_pydatetime()
     delta = lock_at - now.to_pydatetime()
 
     days = delta.days
