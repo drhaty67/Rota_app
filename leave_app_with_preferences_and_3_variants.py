@@ -540,6 +540,7 @@ if save_p:
             "end_date": end_p.isoformat(),
             "leave_lock_at": pd.Timestamp(lock_p, tz="UTC").isoformat(),
         }
+
 try:
     db.table("rota_periods").upsert(payload, on_conflict="name").execute()
 except Exception:
