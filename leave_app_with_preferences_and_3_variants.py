@@ -170,7 +170,7 @@ with st.sidebar:
     # Sign in
     # --------------------
     with col1:
-        if st.button("Sign in", use_container_width=True):
+        if st.button("Sign in", width="stretch"):
             if not email or not password:
                 st.error("Enter email and password.")
             elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
@@ -193,7 +193,7 @@ with st.sidebar:
     # Sign up
     # --------------------
     with col2:
-        if st.button("Sign up", use_container_width=True):
+        if st.button("Sign up", width="stretch"):
             if not email or not password:
                 st.error("Enter email and password.")
             elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
@@ -220,7 +220,7 @@ with st.sidebar:
     # Sign out
     # --------------------
     if st.session_state.get("sb_session"):
-        if st.button("Sign out", use_container_width=True):
+        if st.button("Sign out", width="stretch"):
             st.session_state["sb_session"] = None
             st.rerun()
 
@@ -423,7 +423,7 @@ if leave_df.empty:
 else:
     st.dataframe(
         leave_df[["id","consultant_name","start_date","end_date","leave_type","approved","notes","updated_at"]],
-        use_container_width=True, hide_index=True
+        width="stretch", hide_index=True
     )
 
 # -----------------------------
@@ -491,7 +491,7 @@ if prefs_df.empty:
 else:
     st.dataframe(
         prefs_df[["id","consultant_name","start_date","end_date","pref_kind","shift_type","weight","notes","updated_at"]],
-        use_container_width=True, hide_index=True
+        width="stretch", hide_index=True
     )
 
 # -----------------------------
@@ -619,16 +619,16 @@ if pending.empty:
     st.write("No pending leave requests.")
 else:
     st.dataframe(pending[["id","consultant_name","requester_email","start_date","end_date","leave_type","notes","created_at"]],
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
     approve_id = st.selectbox("Select leave request to approve", options=pending["id"].tolist(), key="leave_appr")
     colA, colB = st.columns([1,1])
     with colA:
-        if st.button("Approve leave", use_container_width=True):
+        if st.button("Approve leave", width="stretch"):
             db.table("leave_requests").update({"approved": True}).eq("id", approve_id).execute()
             st.success("Approved.")
             st.rerun()
     with colB:
-        if st.button("Reject (delete) leave", use_container_width=True):
+        if st.button("Reject (delete) leave", width="stretch"):
             db.table("leave_requests").delete().eq("id", approve_id).execute()
             st.success("Rejected (deleted).")
             st.rerun()
@@ -710,7 +710,7 @@ else:
             if not leave_partial.empty and not force_truncate:
                 st.error("Approved leave partially overlaps the selected period. Enable truncation or correct dates.")
                 st.dataframe(leave_partial[["consultant_name","requester_email","start_date","end_date","leave_type"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
                 st.stop()
 
             if not leave_partial.empty and force_truncate:
@@ -734,7 +734,7 @@ else:
             if not pref_partial.empty and not force_truncate:
                 st.error("Preferred-shift requests partially overlap the selected period. Enable truncation or correct dates.")
                 st.dataframe(pref_partial[["consultant_name","requester_email","start_date","end_date","pref_kind","shift_type","weight"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
                 st.stop()
 
             if not pref_partial.empty and force_truncate:
@@ -896,13 +896,13 @@ if len(results) >= 2:
             colA, colB = st.columns(2)
             with colA:
                 st.caption("Top changed rows")
-                st.dataframe(top_changed_rows(diffs, 30), use_container_width=True, hide_index=True)
+                st.dataframe(top_changed_rows(diffs, 30), width="stretch", hide_index=True)
             with colB:
                 st.caption("Top changed columns")
-                st.dataframe(top_changed_cols(diffs, 30), use_container_width=True, hide_index=True)
+                st.dataframe(top_changed_cols(diffs, 30), width="stretch", hide_index=True)
 
         with st.expander("Cell-level differences (sample)", expanded=False):
-            st.dataframe(diffs.head(500), use_container_width=True, hide_index=True)
+            st.dataframe(diffs.head(500), width="stretch", hide_index=True)
 
         st.caption("Note: This is a generic cell-level diff. If you want an 'assignment-level' diff (e.g., "
                    "which consultant changed on which day/shift), confirm the exact output layout of your solved "
