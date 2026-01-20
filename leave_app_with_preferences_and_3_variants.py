@@ -540,7 +540,7 @@ if save_p:
             "end_date": end_p.isoformat(),
             "leave_lock_at": pd.Timestamp(lock_p, tz="UTC").isoformat(),
         }
-db.table("rota_periods").upsert(payload, on_conflict="name").execute()
+        db.table("rota_periods").upsert(payload, on_conflict="name").execute()
         publish_due_periods()
         st.success("Saved.")
         st.rerun() 
