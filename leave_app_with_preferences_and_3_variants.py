@@ -297,14 +297,16 @@ def next_lock_banner(periods_df: pd.DataFrame, is_admin_user: bool):
     if "is_published" in df.columns:
         df = df[df["is_published"] == False]
     df = df[df["leave_lock_at"].notna()]
-    df = df[df["leave_lock_at"] > now]
-
+        # Coerce leave_lock_at to tz-aware datetime (Supabase often returns it as string)
+    df["leave_lock_at_ts"] = pd.to_datetime(df["leave_lock_at"], errors="coerce", utc=True)
+    df = df[df["leave_lock_at_ts"].notna()]
+    df = df[df["leave_lock_at_ts"] > now]
     if df.empty:
         return
 
-    df = df.sort_values("leave_lock_at")
+    df = df.sort_values("leave_lock_at_ts")
     row = df.iloc[0]
-    lock_at = row["leave_lock_at"].to_pydatetime()
+    lock_at = row["leave_lock_at_ts"].to_pydatetime()
     delta = lock_at - now.to_pydatetime()
 
     days = delta.days
@@ -540,7 +542,22 @@ if save_p:
             "end_date": end_p.isoformat(),
             "leave_lock_at": pd.Timestamp(lock_p, tz="UTC").isoformat(),
         }
-        db.table("rota_periods").upsert(payload, on_conflict="name").execute()
+        # SAFE UPSERT (works even if UNIQUE(name) isn't present)
+        try:
+            db.table("rota_periods").upsert(payload, on_conflict="name").execute()
+        except Exception:
+            existing = (
+                db.table("rota_periods")
+                .select("id")
+                .eq("name", payload.get("name"))
+                .execute()
+            )
+            if existing.data:
+                db.table("rota_periods").update(payload).eq(
+                    "id", existing.data[0]["id"]
+                ).execute()
+            else:
+                db.table("rota_periods").insert(payload).execute()
         publish_due_periods()
         st.success("Saved.")
         st.rerun() 
