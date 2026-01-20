@@ -296,6 +296,8 @@ def next_lock_banner(periods_df: pd.DataFrame, is_admin_user: bool):
     now = pd.Timestamp.now(tz="UTC")
 
     df = periods_df.copy()
+    if "name" in df.columns and "start_date" in df.columns and "end_date" in df.columns:
+        df["label"] = df.apply(lambda r: f"{r.get('name','')} ({r.get('start_date','')} → {r.get('end_date','')})", axis=1)
     if "is_published" in df.columns:
         df = df[df["is_published"] == False]
     df = df[df["leave_lock_at"].notna()]
@@ -306,8 +308,18 @@ def next_lock_banner(periods_df: pd.DataFrame, is_admin_user: bool):
     if df.empty:
         return
 
-    df = df.sort_values("leave_lock_at_ts")
-    row = df.iloc[0]
+        # Prefer the rota period currently selected in the app (if present)
+    selected_label = st.session_state.get("draft_period")
+    if selected_label and "label" in df.columns:
+        match = df[df["label"] == selected_label]
+        if not match.empty:
+            row = match.iloc[0]
+        else:
+            df = df.sort_values("leave_lock_at_ts")
+            row = df.iloc[0]
+    else:
+        df = df.sort_values("leave_lock_at_ts")
+        row = df.iloc[0]
     lock_at = row["leave_lock_at_ts"].to_pydatetime()
     delta = lock_at - now.to_pydatetime()
 
