@@ -540,10 +540,22 @@ if save_p:
             "end_date": end_p.isoformat(),
             "leave_lock_at": pd.Timestamp(lock_p, tz="UTC").isoformat(),
         }
-        db.table("rota_periods").upsert(payload, on_conflict="name").execute()
-        publish_due_periods()
-        st.success("Saved.")
-        st.rerun()
+try:
+    db.table("rota_periods").upsert(payload, on_conflict="name").execute()
+except Exception:
+    existing = (
+        db.table("rota_periods")
+        .select("id")
+        .eq("name", payload.get("name"))
+        .execute()
+    )
+    if existing.data:
+        db.table("rota_periods").update(payload).eq(
+            "id", existing.data[0]["id"]
+        ).execute()
+    else:
+        db.table("rota_periods").insert(payload).execute()
+        
     except Exception as e:
         st.error("Failed to save rota period.")
         st.exception(e)
