@@ -1,7 +1,9 @@
 import streamlit as st
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, time
 from io import BytesIO
 import pandas as pd
+from zoneinfo import ZoneInfo
+
 from openpyxl import load_workbook
 from supabase import create_client, Client
 import subprocess
@@ -168,7 +170,7 @@ with st.sidebar:
     # Sign in
     # --------------------
     with col1:
-        if st.button("Sign in", use_container_width=True):
+        if st.button("Sign in", width="stretch"):
             if not email or not password:
                 st.error("Enter email and password.")
             elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
@@ -191,7 +193,7 @@ with st.sidebar:
     # Sign up
     # --------------------
     with col2:
-        if st.button("Sign up", use_container_width=True):
+        if st.button("Sign up", width="stretch"):
             if not email or not password:
                 st.error("Enter email and password.")
             elif ALLOWED_EMAIL_DOMAIN and not email.endswith("@" + ALLOWED_EMAIL_DOMAIN):
@@ -218,7 +220,7 @@ with st.sidebar:
     # Sign out
     # --------------------
     if st.session_state.get("sb_session"):
-        if st.button("Sign out", use_container_width=True):
+        if st.button("Sign out", width="stretch"):
             st.session_state["sb_session"] = None
             st.rerun()
 
@@ -294,6 +296,8 @@ def next_lock_banner(periods_df: pd.DataFrame, is_admin_user: bool):
     now = pd.Timestamp.now(tz="UTC")
 
     df = periods_df.copy()
+    if "name" in df.columns and "start_date" in df.columns and "end_date" in df.columns:
+        df["label"] = df.apply(lambda r: f"{r.get('name','')} ({r.get('start_date','')} → {r.get('end_date','')})", axis=1)
     if "is_published" in df.columns:
         df = df[df["is_published"] == False]
     df = df[df["leave_lock_at"].notna()]
@@ -304,8 +308,18 @@ def next_lock_banner(periods_df: pd.DataFrame, is_admin_user: bool):
     if df.empty:
         return
 
-    df = df.sort_values("leave_lock_at_ts")
-    row = df.iloc[0]
+        # Prefer the rota period currently selected in the app (if present)
+    selected_label = st.session_state.get("draft_period")
+    if selected_label and "label" in df.columns:
+        match = df[df["label"] == selected_label]
+        if not match.empty:
+            row = match.iloc[0]
+        else:
+            df = df.sort_values("leave_lock_at_ts")
+            row = df.iloc[0]
+    else:
+        df = df.sort_values("leave_lock_at_ts")
+        row = df.iloc[0]
     lock_at = row["leave_lock_at_ts"].to_pydatetime()
     delta = lock_at - now.to_pydatetime()
 
@@ -328,7 +342,7 @@ next_lock_banner(periods, is_admin)
 if periods.empty:
     st.info("No rota periods configured yet.")
 else:
-    st.dataframe(periods[["id","name","start_date","end_date","is_published","published_at"]],
+    st.dataframe(periods[["name","start_date","end_date","is_published","published_at"]],
                  width="stretch", hide_index=True)
     if not periods[periods["is_published"] == True].empty:
         st.caption("Requests overlapping published periods are locked for consultants.")
@@ -408,8 +422,8 @@ if leave_df.empty:
     st.info("No leave requests found.")
 else:
     st.dataframe(
-        leave_df[["id","consultant_name","start_date","end_date","leave_type","approved","notes","updated_at"]],
-        use_container_width=True, hide_index=True
+        leave_df[["consultant_name","start_date","end_date","leave_type","approved","notes","updated_at"]],
+        width="stretch", hide_index=True
     )
 
 # -----------------------------
@@ -476,8 +490,8 @@ if prefs_df.empty:
     st.info("No preferred-shift requests found.")
 else:
     st.dataframe(
-        prefs_df[["id","consultant_name","start_date","end_date","pref_kind","shift_type","weight","notes","updated_at"]],
-        use_container_width=True, hide_index=True
+        prefs_df[["consultant_name","start_date","end_date","pref_kind","shift_type","weight","notes","updated_at"]],
+        width="stretch", hide_index=True
     )
 
 # -----------------------------
@@ -512,7 +526,7 @@ periods_admin = fetch_periods()
 if periods_admin.empty:
     st.info("No rota periods configured yet.")
 else:
-    cols_show = ["id","name","start_date","end_date"]
+    cols_show = ["name","start_date","end_date"]
     if "leave_lock_at" in periods_admin.columns:
         cols_show += ["leave_lock_at"]
     cols_show += ["is_published","published_at"]
@@ -527,11 +541,13 @@ with st.form("rota_period_upsert"):
     name_p = st.text_input("Period name (e.g., Nov 2025 – May 2026)")
     start_p = st.date_input("Start date", value=pd.Timestamp.utcnow().date())
     end_p = st.date_input("End date", value=(pd.Timestamp.utcnow() + pd.Timedelta(days=180)).date())
-    lock_p = st.datetime_input(
-        "Leave lock (UTC)",
-        value=(pd.Timestamp.utcnow() + pd.Timedelta(days=14)).to_pydatetime(),
-        help="After this time, consultants can no longer add/edit/delete leave or preferred shifts for this period."
-    )
+        # Leave lock: admin-selectable date and time (stored as UTC)
+    # Input is in Europe/London to match operational practice; it is converted to UTC for storage.
+    default_lock_date = (pd.Timestamp.utcnow() + pd.Timedelta(days=14)).date()
+    lock_date = st.date_input("Leave lock date (Europe/London)", value=default_lock_date)
+    lock_time = st.time_input("Leave lock time (Europe/London)", value=time(17, 0))
+    lock_local = pd.Timestamp.combine(lock_date, lock_time).to_pydatetime().replace(tzinfo=ZoneInfo("Europe/London"))
+    lock_p = pd.Timestamp(lock_local).tz_convert("UTC").to_pydatetime()
     save_p = st.form_submit_button("Save period")
 
 if save_p:
@@ -540,7 +556,7 @@ if save_p:
             "name": name_p,
             "start_date": start_p.isoformat(),
             "end_date": end_p.isoformat(),
-            "leave_lock_at": pd.Timestamp(lock_p, tz="UTC").isoformat(),
+            "leave_lock_at": pd.Timestamp(lock_p).tz_convert("UTC").isoformat(),
         }
         # SAFE UPSERT (works even if UNIQUE(name) isn't present)
         try:
@@ -604,16 +620,16 @@ if pending.empty:
     st.write("No pending leave requests.")
 else:
     st.dataframe(pending[["id","consultant_name","requester_email","start_date","end_date","leave_type","notes","created_at"]],
-                 use_container_width=True, hide_index=True)
+                 width="stretch", hide_index=True)
     approve_id = st.selectbox("Select leave request to approve", options=pending["id"].tolist(), key="leave_appr")
     colA, colB = st.columns([1,1])
     with colA:
-        if st.button("Approve leave", use_container_width=True):
+        if st.button("Approve leave", width="stretch"):
             db.table("leave_requests").update({"approved": True}).eq("id", approve_id).execute()
             st.success("Approved.")
             st.rerun()
     with colB:
-        if st.button("Reject (delete) leave", use_container_width=True):
+        if st.button("Reject (delete) leave", width="stretch"):
             db.table("leave_requests").delete().eq("id", approve_id).execute()
             st.success("Rejected (deleted).")
             st.rerun()
@@ -695,7 +711,7 @@ else:
             if not leave_partial.empty and not force_truncate:
                 st.error("Approved leave partially overlaps the selected period. Enable truncation or correct dates.")
                 st.dataframe(leave_partial[["consultant_name","requester_email","start_date","end_date","leave_type"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
                 st.stop()
 
             if not leave_partial.empty and force_truncate:
@@ -719,7 +735,7 @@ else:
             if not pref_partial.empty and not force_truncate:
                 st.error("Preferred-shift requests partially overlap the selected period. Enable truncation or correct dates.")
                 st.dataframe(pref_partial[["consultant_name","requester_email","start_date","end_date","pref_kind","shift_type","weight"]],
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
                 st.stop()
 
             if not pref_partial.empty and force_truncate:
@@ -881,13 +897,13 @@ if len(results) >= 2:
             colA, colB = st.columns(2)
             with colA:
                 st.caption("Top changed rows")
-                st.dataframe(top_changed_rows(diffs, 30), use_container_width=True, hide_index=True)
+                st.dataframe(top_changed_rows(diffs, 30), width="stretch", hide_index=True)
             with colB:
                 st.caption("Top changed columns")
-                st.dataframe(top_changed_cols(diffs, 30), use_container_width=True, hide_index=True)
+                st.dataframe(top_changed_cols(diffs, 30), width="stretch", hide_index=True)
 
         with st.expander("Cell-level differences (sample)", expanded=False):
-            st.dataframe(diffs.head(500), use_container_width=True, hide_index=True)
+            st.dataframe(diffs.head(500), width="stretch", hide_index=True)
 
         st.caption("Note: This is a generic cell-level diff. If you want an 'assignment-level' diff (e.g., "
                    "which consultant changed on which day/shift), confirm the exact output layout of your solved "
