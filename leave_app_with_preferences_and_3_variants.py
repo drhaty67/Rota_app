@@ -342,7 +342,7 @@ next_lock_banner(periods, is_admin)
 if periods.empty:
     st.info("No rota periods configured yet.")
 else:
-    st.dataframe(periods[["id","name","start_date","end_date","is_published","published_at"]],
+    st.dataframe(periods[["name","start_date","end_date","is_published","published_at"]],
                  width="stretch", hide_index=True)
     if not periods[periods["is_published"] == True].empty:
         st.caption("Requests overlapping published periods are locked for consultants.")
@@ -422,7 +422,7 @@ if leave_df.empty:
     st.info("No leave requests found.")
 else:
     st.dataframe(
-        leave_df[["id","consultant_name","start_date","end_date","leave_type","approved","notes","updated_at"]],
+        leave_df[["consultant_name","start_date","end_date","leave_type","approved","notes","updated_at"]],
         width="stretch", hide_index=True
     )
 
@@ -490,7 +490,7 @@ if prefs_df.empty:
     st.info("No preferred-shift requests found.")
 else:
     st.dataframe(
-        prefs_df[["id","consultant_name","start_date","end_date","pref_kind","shift_type","weight","notes","updated_at"]],
+        prefs_df[["consultant_name","start_date","end_date","pref_kind","shift_type","weight","notes","updated_at"]],
         width="stretch", hide_index=True
     )
 
@@ -526,7 +526,7 @@ periods_admin = fetch_periods()
 if periods_admin.empty:
     st.info("No rota periods configured yet.")
 else:
-    cols_show = ["id","name","start_date","end_date"]
+    cols_show = ["name","start_date","end_date"]
     if "leave_lock_at" in periods_admin.columns:
         cols_show += ["leave_lock_at"]
     cols_show += ["is_published","published_at"]
