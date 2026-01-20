@@ -2,6 +2,8 @@ import streamlit as st
 from datetime import date, datetime, timedelta
 from io import BytesIO
 import pandas as pd
+from zoneinfo import ZoneInfo
+
 from openpyxl import load_workbook
 from supabase import create_client, Client
 import subprocess
@@ -527,11 +529,13 @@ with st.form("rota_period_upsert"):
     name_p = st.text_input("Period name (e.g., Nov 2025 – May 2026)")
     start_p = st.date_input("Start date", value=pd.Timestamp.utcnow().date())
     end_p = st.date_input("End date", value=(pd.Timestamp.utcnow() + pd.Timedelta(days=180)).date())
-    lock_p = st.datetime_input(
-        "Leave lock (UTC)",
-        value=(pd.Timestamp.utcnow() + pd.Timedelta(days=14)).to_pydatetime(),
-        help="After this time, consultants can no longer add/edit/delete leave or preferred shifts for this period."
-    )
+        # Leave lock: admin-selectable date and time (stored as UTC)
+    # Input is in Europe/London to match operational practice; it is converted to UTC for storage.
+    default_lock_date = (pd.Timestamp.utcnow() + pd.Timedelta(days=14)).date()
+    lock_date = st.date_input("Leave lock date (Europe/London)", value=default_lock_date)
+    lock_time = st.time_input("Leave lock time (Europe/London)", value=time(17, 0))
+    lock_local = pd.Timestamp.combine(lock_date, lock_time).to_pydatetime().replace(tzinfo=ZoneInfo("Europe/London"))
+    lock_p = pd.Timestamp(lock_local).tz_convert("UTC").to_pydatetime()
     save_p = st.form_submit_button("Save period")
 
 if save_p:
@@ -540,7 +544,7 @@ if save_p:
             "name": name_p,
             "start_date": start_p.isoformat(),
             "end_date": end_p.isoformat(),
-            "leave_lock_at": pd.Timestamp(lock_p, tz="UTC").isoformat(),
+            "leave_lock_at": pd.Timestamp(lock_p).tz_convert("UTC").isoformat(),
         }
         # SAFE UPSERT (works even if UNIQUE(name) isn't present)
         try:
