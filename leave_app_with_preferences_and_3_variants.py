@@ -430,7 +430,7 @@ else:
 # 2) Preferred shifts request
 # -----------------------------
 st.subheader("3) Submit one preferred-shift request (note you are only allowed to submit one request")
-st.caption("Examples: request a particular week, a weekend, or a shift type (A/B/D) on specific dates.")
+st.caption("Examples: request a particular week, a weekend, or a shift type (A/B/D/Weekend) on specific dates.")
 
 with st.form("pref_add"):
     p1, p2, p3 = st.columns([2, 1, 1])
