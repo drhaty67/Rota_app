@@ -18,17 +18,46 @@ from pathlib import Path
 
 # --- Variant diff helpers (for comparing solved rota variants) ---
 try:
-    # If variant_diff_helpers.py is in the repo root, this should work
-    from variant_diff_helpers import common_sheets  # type: ignore
+    from variant_diff_helpers import common_sheets, diff_sheet, diff_summary  # type: ignore
 except Exception:
-    # Fallback: compute common sheet names directly from bytes
     def common_sheets(base_bytes: bytes, comp_bytes: bytes):
         import io
         import openpyxl
-
         wb1 = openpyxl.load_workbook(io.BytesIO(base_bytes), data_only=False)
         wb2 = openpyxl.load_workbook(io.BytesIO(comp_bytes), data_only=False)
         return sorted(set(wb1.sheetnames).intersection(set(wb2.sheetnames)))
+
+    def diff_sheet(base_bytes: bytes, comp_bytes: bytes, sheet_name: str, max_cells: int = 8000):
+        import io
+        import openpyxl
+        wb1 = openpyxl.load_workbook(io.BytesIO(base_bytes), data_only=False)
+        wb2 = openpyxl.load_workbook(io.BytesIO(comp_bytes), data_only=False)
+        if sheet_name not in wb1.sheetnames or sheet_name not in wb2.sheetnames:
+            return []
+        ws1 = wb1[sheet_name]
+        ws2 = wb2[sheet_name]
+        max_row = max(ws1.max_row or 1, ws2.max_row or 1)
+        max_col = max(ws1.max_column or 1, ws2.max_column or 1)
+
+        diffs = []
+        checked = 0
+        for r in range(1, max_row + 1):
+            for c in range(1, max_col + 1):
+                v1 = ws1.cell(row=r, column=c).value
+                v2 = ws2.cell(row=r, column=c).value
+                if v1 != v2:
+                    diffs.append({
+                        "cell": openpyxl.utils.get_column_letter(c) + str(r),
+                        "old": v1,
+                        "new": v2,
+                    })
+                checked += 1
+                if checked >= max_cells:
+                    return diffs
+        return diffs
+
+    def diff_summary(diffs):
+        return {"changed_cells": len(diffs)}
 
 # --- Supabase email confirmation / magic link handler ---
 query_params = st.query_params
@@ -893,41 +922,48 @@ if len(results) >= 2:
     st.markdown("---")
     st.subheader("Visual differences between rota variants")
 
-    # Choose baseline and comparator
-    variant_names = [r[0] for r in results]
-    baseline_name = st.selectbox("Baseline variant", variant_names, index=0, key="diff_base")
-    compare_name = st.selectbox("Compare to", variant_names, index=1, key="diff_comp")
+    # Guard: need at least 2 results
+    if "results" not in globals() or results is None or len(results) < 2:
+    st.info("Create at least 2 rota variants to compare.")
+    else:
+    names = [n for (n, _, _) in results]
+    baseline_name = st.selectbox("Baseline variant", names, index=0)
+    compare_name = st.selectbox("Compare against", names, index=1 if len(names) > 1 else 0)
 
     base_bytes = next(b for (n, b, _) in results if n == baseline_name)
     comp_bytes = next(b for (n, b, _) in results if n == compare_name)
 
-    sheets = common_sheets(base_bytes, comp_bytes)
-    default_sheet = "Rota" if "Rota" in sheets else sheets[0]
-    sheet = st.selectbox("Sheet to compare", sheets, index=sheets.index(default_sheet), key="diff_sheet")
+    try:
+        sheets = common_sheets(base_bytes, comp_bytes)
+    except Exception as e:
+        st.error(f"Could not read workbooks to compare sheets: {e}")
+        sheets = []
 
-    diffs = diff_sheet(base_bytes, comp_bytes, sheet_name=sheet, max_changes=5000)
-    s = diff_summary(diffs)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Changed cells", s["changed_cells"])
-    c2.metric("Rows affected", s["changed_rows"])
-    c3.metric("Columns affected", s["changed_cols"])
-
-    if diffs.empty:
-        st.success("No differences detected on the selected sheet.")
+    if not sheets:
+        st.info("No common sheets found between the two workbooks.")
     else:
-        with st.expander("Show where differences occur (row/column hotspots)", expanded=True):
-            colA, colB = st.columns(2)
-            with colA:
-                st.caption("Top changed rows")
-                st.dataframe(top_changed_rows(diffs, 30), width="stretch", hide_index=True)
-            with colB:
-                st.caption("Top changed columns")
-                st.dataframe(top_changed_cols(diffs, 30), width="stretch", hide_index=True)
+        default_sheet = "Rota" if "Rota" in sheets else sheets[0]
+        sheet = st.selectbox("Sheet to compare", sheets, index=sheets.index(default_sheet))
 
-        with st.expander("Cell-level differences (sample)", expanded=False):
-            st.dataframe(diffs.head(500), width="stretch", hide_index=True)
+        max_cells = st.slider("Comparison depth (cells scanned)", 1000, 50000, 8000, step=1000)
 
-        st.caption("Note: This is a generic cell-level diff. If you want an 'assignment-level' diff (e.g., "
-                   "which consultant changed on which day/shift), confirm the exact output layout of your solved "
-                   "workbook and we can parse it into structured comparisons.")
+        try:
+            diffs = diff_sheet(base_bytes, comp_bytes, sheet_name=sheet, max_cells=max_cells)
+            s = diff_summary(diffs)
+        except Exception as e:
+            st.error(f"Comparison failed: {e}")
+            diffs, s = [], {"changed_cells": 0}
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Changed cells", s.get("changed_cells", len(diffs)))
+        c2.metric("Baseline", baseline_name)
+        c3.metric("Compared", compare_name)
+
+        if not diffs:
+            st.success("No differences detected (within the scanned range).")
+        else:
+            # show first N diffs
+            show_n = st.slider("Show first N changes", 50, 1000, 200, step=50)
+            st.dataframe(diffs[:show_n], width="stretch", hide_index=True)
+            if len(diffs) > show_n:
+                st.caption(f"Showing first {show_n} changes. Increase 'Show first N changes' to see more.")
