@@ -964,7 +964,7 @@ if len(results) >= 2:
             8000,
             step=1000
         )
-try:
+    try:
         # Support both helper signatures:
         # - diff_sheet(..., max_cells=...)
         # - diff_sheet(..., max_changes=...)
