@@ -30,30 +30,38 @@ except Exception:
     def diff_sheet(base_bytes: bytes, comp_bytes: bytes, sheet_name: str, max_cells: int = 8000):
         import io
         import openpyxl
+    
         wb1 = openpyxl.load_workbook(io.BytesIO(base_bytes), data_only=False)
         wb2 = openpyxl.load_workbook(io.BytesIO(comp_bytes), data_only=False)
+    
         if sheet_name not in wb1.sheetnames or sheet_name not in wb2.sheetnames:
             return []
+    
         ws1 = wb1[sheet_name]
         ws2 = wb2[sheet_name]
+    
         max_row = max(ws1.max_row or 1, ws2.max_row or 1)
         max_col = max(ws1.max_column or 1, ws2.max_column or 1)
-
+    
         diffs = []
         checked = 0
+    
         for r in range(1, max_row + 1):
             for c in range(1, max_col + 1):
                 v1 = ws1.cell(row=r, column=c).value
                 v2 = ws2.cell(row=r, column=c).value
+    
                 if v1 != v2:
                     diffs.append({
                         "cell": openpyxl.utils.get_column_letter(c) + str(r),
                         "old": v1,
-                        "new": v2,
+                        "new": v2
                     })
+    
                 checked += 1
                 if checked >= max_cells:
                     return diffs
+    
         return diffs
 
     def diff_summary(diffs):
