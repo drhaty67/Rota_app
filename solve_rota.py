@@ -67,7 +67,7 @@ def fetch_period_dates_from_supabase(period_name: str):
     resp = sb.table("rota_periods").select("start_date,end_date").eq("name", period_name).limit(1).execute()
     data = resp.data or []
     if not data:
-        raise RuntimeError(f"No rota_periods row found with name='{period_name}'.")
+        raise RuntimeError(f"No rota_periods row found with "name"='{period_name}'.")
     row = data[0]
 
     def _to_date(v):
