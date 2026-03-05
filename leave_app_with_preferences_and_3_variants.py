@@ -1,13 +1,9 @@
 import streamlit as st
 import os
-
-# Expose Streamlit secrets to subprocess environment
-if "SUPABASE_URL" in st.secrets:
-    os.environ["SUPABASE_URL"] = st.secrets["SUPABASE_URL"]
-
-# solver accepts SUPABASE_KEY or SUPABASE_ANON_KEY
-if "SUPABASE_ANON_KEY" in st.secrets:
-    os.environ["SUPABASE_KEY"] = st.secrets["SUPABASE_ANON_KEY"]
+import os
+os.environ["SUPABASE_URL"] = st.secrets["SUPABASE_URL"]
+os.environ["SUPABASE_SERVICE_KEY"] = st.secrets["SUPABASE_SERVICE_KEY"]
+os.environ["SUPABASE_KEY"] = st.secrets["SUPABASE_SERVICE_KEY"]  # solver fallback
 import sys
 from datetime import date, datetime, timedelta, time
 from io import BytesIO
