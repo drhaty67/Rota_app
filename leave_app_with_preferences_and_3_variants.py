@@ -1,4 +1,10 @@
 import streamlit as st
+import os
+import os
+os.environ["SUPABASE_URL"] = st.secrets["SUPABASE_URL"]
+os.environ["SUPABASE_SERVICE_KEY"] = st.secrets["SUPABASE_SERVICE_KEY"]
+os.environ["SUPABASE_KEY"] = st.secrets["SUPABASE_SERVICE_KEY"]  # solver fallback
+import sys
 from datetime import date, datetime, timedelta, time
 from io import BytesIO
 import pandas as pd
@@ -9,6 +15,57 @@ from supabase import create_client, Client
 import subprocess
 import tempfile
 from pathlib import Path
+
+# --- Variant diff helpers (for comparing solved rota variants) ---
+try:
+    from variant_diff_helpers import common_sheets, diff_sheet, diff_summary  # type: ignore
+except Exception:
+    def common_sheets(base_bytes: bytes, comp_bytes: bytes):
+        import io
+        import openpyxl
+        wb1 = openpyxl.load_workbook(io.BytesIO(base_bytes), data_only=False)
+        wb2 = openpyxl.load_workbook(io.BytesIO(comp_bytes), data_only=False)
+        return sorted(set(wb1.sheetnames).intersection(set(wb2.sheetnames)))
+
+    def diff_sheet(base_bytes: bytes, comp_bytes: bytes, sheet_name: str, max_cells: int = 8000):
+        import io
+        import openpyxl
+    
+        wb1 = openpyxl.load_workbook(io.BytesIO(base_bytes), data_only=False)
+        wb2 = openpyxl.load_workbook(io.BytesIO(comp_bytes), data_only=False)
+    
+        if sheet_name not in wb1.sheetnames or sheet_name not in wb2.sheetnames:
+            return []
+    
+        ws1 = wb1[sheet_name]
+        ws2 = wb2[sheet_name]
+    
+        max_row = max(ws1.max_row or 1, ws2.max_row or 1)
+        max_col = max(ws1.max_column or 1, ws2.max_column or 1)
+    
+        diffs = []
+        checked = 0
+    
+        for r in range(1, max_row + 1):
+            for c in range(1, max_col + 1):
+                v1 = ws1.cell(row=r, column=c).value
+                v2 = ws2.cell(row=r, column=c).value
+    
+                if v1 != v2:
+                    diffs.append({
+                        "cell": openpyxl.utils.get_column_letter(c) + str(r),
+                        "old": v1,
+                        "new": v2
+                    })
+    
+                checked += 1
+                if checked >= max_cells:
+                    return diffs
+    
+        return diffs
+
+    def diff_summary(diffs):
+        return {"changed_cells": len(diffs)}
 
 # --- Supabase email confirmation / magic link handler ---
 query_params = st.query_params
@@ -36,6 +93,10 @@ st.set_page_config(page_title="Rota Requests + Solver", layout="wide")
 # Persist solver results across Streamlit reruns (for variant comparison UI)
 if "draft_results" not in st.session_state:
     st.session_state["draft_results"] = []
+if "draft_done" not in st.session_state:
+    st.session_state["draft_done"] = False
+if "draft_period_name" not in st.session_state:
+    st.session_state["draft_period_name"] = ""
 
 # -----------------------------
 # Secrets
@@ -430,7 +491,7 @@ else:
 # 2) Preferred shifts request
 # -----------------------------
 st.subheader("3) Submit one preferred-shift request (note you are only allowed to submit one request")
-st.caption("Examples: request a particular week, a weekend, or a shift type (A/B/D) on specific dates.")
+st.caption("Examples: request a particular week, a weekend, or a shift type (A/B/D/Weekend) on specific dates.")
 
 with st.form("pref_add"):
     p1, p2, p3 = st.columns([2, 1, 1])
@@ -661,6 +722,7 @@ periods_sorted["label"] = periods_sorted.apply(
 )
 sel_label = st.selectbox("Select rota period", options=periods_sorted["label"].tolist(), key="draft_period")
 sel_row = periods_sorted[periods_sorted["label"] == sel_label].iloc[0]
+period_name = str(sel_row["name"])
 
 period_start = sel_row["start_date"]
 period_end = sel_row["end_date"]
@@ -673,6 +735,17 @@ if not period_published:
     st.stop()
 
 template = st.file_uploader("Upload base rota workbook (.xlsx)", type=["xlsx"], key="draft_template")
+
+# Reset drafting state + clear uploaded workbook (admin only convenience)
+c_reset1, c_reset2 = st.columns([1, 2])
+with c_reset1:
+    if st.button("🔄 Reset drafting", key="draft_reset", help="Clears stored variants and removes the uploaded workbook so you can upload a new one and redraft."):
+        for k in ["draft_results", "draft_done", "draft_period_name", "draft_template"]:
+            if k in st.session_state:
+                del st.session_state[k]
+        st.rerun()
+with c_reset2:
+    st.caption("Use **Reset drafting** before uploading a new workbook or rerunning the solver with different inputs.")
 solver_script = Path("solve_rota.py")
 
 if not solver_script.exists():
@@ -695,174 +768,197 @@ variant_seeds = [11, 22, 33]  # stable defaults
 if template is None:
     st.info("Upload the base rota workbook to enable drafting.")
 else:
-    if st.button("Draft 3 rota versions now"):
-        # --- Prepare filtered leave (approved) ---
-        leave_all = fetch_leave()
-        leave_ok = leave_all[leave_all["approved"] == True].copy() if not leave_all.empty else pd.DataFrame()
+    # Run solver only when explicitly requested. Keep results in session_state so downloads do NOT require rerunning.
+    if st.button("Draft 3 rota versions now", key="draft_run"):
+        st.session_state["draft_results"] = []
+        st.session_state["draft_done"] = False
+        st.session_state["draft_period_name"] = period_name
 
-        # Keep only those overlapping window; error if partial overlap unless truncate enabled
-        if not leave_ok.empty:
-            overlaps_period = leave_ok.apply(lambda r: overlap(r["start_date"], r["end_date"], period_start, period_end), axis=1)
-            leave_overlap = leave_ok[overlaps_period].copy()
+        with st.spinner("Drafting 3 rota variants..."):
+            # --- Prepare filtered leave (approved) ---
+            leave_all = fetch_leave()
+            leave_ok = leave_all[leave_all["approved"] == True].copy() if not leave_all.empty else pd.DataFrame()
 
-            contained = leave_overlap.apply(lambda r: (r["start_date"] >= period_start) and (r["end_date"] <= period_end), axis=1)
-            leave_partial = leave_overlap[~contained].copy()
+            # Keep only those overlapping window; error if partial overlap unless truncate enabled
+            if not leave_ok.empty:
+                overlaps_period = leave_ok.apply(lambda r: overlap(r["start_date"], r["end_date"], period_start, period_end), axis=1)
+                leave_overlap = leave_ok[overlaps_period].copy()
 
-            if not leave_partial.empty and not force_truncate:
-                st.error("Approved leave partially overlaps the selected period. Enable truncation or correct dates.")
-                st.dataframe(leave_partial[["consultant_name","requester_email","start_date","end_date","leave_type"]],
-                             width="stretch", hide_index=True)
-                st.stop()
-
-            if not leave_partial.empty and force_truncate:
-                leave_overlap.loc[leave_partial.index, "start_date"] = leave_partial["start_date"].apply(lambda d: max(d, period_start))
-                leave_overlap.loc[leave_partial.index, "end_date"] = leave_partial["end_date"].apply(lambda d: min(d, period_end))
                 contained = leave_overlap.apply(lambda r: (r["start_date"] >= period_start) and (r["end_date"] <= period_end), axis=1)
+                leave_partial = leave_overlap[~contained].copy()
 
-            leave_final = leave_overlap[contained].copy()
-        else:
-            leave_final = leave_ok
+                if not leave_partial.empty and not force_truncate:
+                    st.error("Approved leave partially overlaps the selected period. Enable truncation or correct dates.")
+                    st.dataframe(
+                        leave_partial[["consultant_name", "requester_email", "start_date", "end_date", "leave_type"]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+                    st.stop()
 
-        # --- Prepare filtered preferences ---
-        pref_all = fetch_prefs()
-        if not pref_all.empty:
-            overlaps_period = pref_all.apply(lambda r: overlap(r["start_date"], r["end_date"], period_start, period_end), axis=1)
-            pref_overlap = pref_all[overlaps_period].copy()
+                if not leave_partial.empty and force_truncate:
+                    leave_overlap.loc[leave_partial.index, "start_date"] = leave_partial["start_date"].apply(lambda d: max(d, period_start))
+                    leave_overlap.loc[leave_partial.index, "end_date"] = leave_partial["end_date"].apply(lambda d: min(d, period_end))
+                    contained = leave_overlap.apply(lambda r: (r["start_date"] >= period_start) and (r["end_date"] <= period_end), axis=1)
 
-            contained = pref_overlap.apply(lambda r: (r["start_date"] >= period_start) and (r["end_date"] <= period_end), axis=1)
-            pref_partial = pref_overlap[~contained].copy()
+                leave_final = leave_overlap[contained].copy()
+            else:
+                leave_final = leave_ok
 
-            if not pref_partial.empty and not force_truncate:
-                st.error("Preferred-shift requests partially overlap the selected period. Enable truncation or correct dates.")
-                st.dataframe(pref_partial[["consultant_name","requester_email","start_date","end_date","pref_kind","shift_type","weight"]],
-                             width="stretch", hide_index=True)
-                st.stop()
+            # --- Prepare filtered preferences ---
+            pref_all = fetch_prefs()
+            if not pref_all.empty:
+                overlaps_period = pref_all.apply(lambda r: overlap(r["start_date"], r["end_date"], period_start, period_end), axis=1)
+                pref_overlap = pref_all[overlaps_period].copy()
 
-            if not pref_partial.empty and force_truncate:
-                pref_overlap.loc[pref_partial.index, "start_date"] = pref_partial["start_date"].apply(lambda d: max(d, period_start))
-                pref_overlap.loc[pref_partial.index, "end_date"] = pref_partial["end_date"].apply(lambda d: min(d, period_end))
                 contained = pref_overlap.apply(lambda r: (r["start_date"] >= period_start) and (r["end_date"] <= period_end), axis=1)
+                pref_partial = pref_overlap[~contained].copy()
 
-            pref_final = pref_overlap[contained].copy()
-        else:
-            pref_final = pref_all
+                if not pref_partial.empty and not force_truncate:
+                    st.error("Preferred-shift requests partially overlap the selected period. Enable truncation or correct dates.")
+                    st.dataframe(
+                        pref_partial[["consultant_name", "requester_email", "start_date", "end_date", "pref_kind", "shift_type", "weight"]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+                    st.stop()
 
-        # --- Build solver input workbook ---
-        wb = load_workbook(BytesIO(template.getvalue()))
-        if "Leave" not in wb.sheetnames:
-            st.error("Workbook must contain a sheet named 'Leave'.")
-            st.stop()
+                if not pref_partial.empty and force_truncate:
+                    pref_overlap.loc[pref_partial.index, "start_date"] = pref_partial["start_date"].apply(lambda d: max(d, period_start))
+                    pref_overlap.loc[pref_partial.index, "end_date"] = pref_partial["end_date"].apply(lambda d: min(d, period_end))
+                    contained = pref_overlap.apply(lambda r: (r["start_date"] >= period_start) and (r["end_date"] <= period_end), axis=1)
 
-        # Ensure preferred_shifts sheet exists
-        if "preferred_shifts" not in wb.sheetnames:
-            wb.create_sheet("preferred_shifts")
+                pref_final = pref_overlap[contained].copy()
+            else:
+                pref_final = pref_all
 
-        # Write Leave sheet (same structure as existing template)
-        lws = wb["Leave"]
-        for r in range(2, 5000):
-            if lws[f"A{r}"].value in (None, ""):
-                break
-            for col in ("A","B","C","D","E"):
-                lws[f"{col}{r}"].value = None
-
-        r = 2
-        if not leave_final.empty:
-            leave_final = leave_final.sort_values(["start_date","consultant_name"], na_position="last")
-            for _, rec in leave_final.iterrows():
-                lws[f"A{r}"].value = rec["consultant_name"]
-                lws[f"B{r}"].value = rec["start_date"]
-                lws[f"C{r}"].value = rec["end_date"]
-                lws[f"D{r}"].value = rec["leave_type"]
-                lws[f"E{r}"].value = True
-                r += 1
-
-        # Write preferred_shifts sheet (header + rows)
-        pws = wb["preferred_shifts"]
-        # Clear sheet completely then rewrite header for clarity
-        pws.delete_rows(1, pws.max_row if pws.max_row else 1)
-        pws.append(["Name", "StartDate", "EndDate", "PrefKind", "ShiftType", "Weight", "Notes"])
-
-        if not pref_final.empty:
-            pref_final = pref_final.sort_values(["start_date","consultant_name"], na_position="last")
-            for _, rec in pref_final.iterrows():
-                pws.append([
-                    rec["consultant_name"],
-                    rec["start_date"],
-                    rec["end_date"],
-                    rec.get("pref_kind"),
-                    rec.get("shift_type"),
-                    int(rec.get("weight", 3)),
-                    rec.get("notes")
-                ])
-
-        # --- Run solver: produce 3 variants ---
-        with tempfile.TemporaryDirectory() as td:
-            td_path = Path(td)
-            solver_input = td_path / "Rota_Master_WITH_Leave.xlsx"
-            wb.save(solver_input)
-
-            attempts_base = []
-            attempts_base.append(("Strict", ["python", "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx"]))
-            if relax_week_gap:
-                attempts_base.append(("Relax week-gap", ["python", "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx", "--no_hard_week_gap"]))
-            if relax_no_consec_weekends:
-                attempts_base.append(("Relax no-consec-weekends", ["python", "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx", "--no_hard_no_consec_weekends"]))
-            if relax_week_gap and relax_no_consec_weekends:
-                attempts_base.append(("Relax BOTH", ["python", "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx",
-                                                    "--no_hard_week_gap", "--no_hard_no_consec_weekends"]))
-
-            results = []  # list of (variant_name, bytes, label_used)
-            for i, seed in enumerate(variant_seeds, start=1):
-                variant_name = f"Variant {i} (seed {seed})"
-                out_file = td_path / f"Rota_Solved_V{i}.xlsx"
-
-                succeeded = False
-                used_label = None
-                last_logs = ""
-
-                for label, cmd in attempts_base:
-                    # Require a small patch in solve_rota.py: accept --seed and apply it to OR-Tools solver parameters.
-                    cmd2 = cmd.copy()
-                    # Replace output placeholder
-                    cmd2[cmd2.index("OUT.xlsx")] = str(out_file)
-                    cmd2 += ["--seed", str(seed)]
-
-                    st.write(f"Running {variant_name}: **{label}**")
-                    proc = subprocess.run(cmd2, capture_output=True, text=True)
-
-                    if proc.stdout and proc.stdout.strip():
-                        st.code(proc.stdout[-1500:])
-                    if proc.stderr and proc.stderr.strip():
-                        st.code(proc.stderr[-1500:])
-
-                    if proc.returncode == 0 and out_file.exists() and out_file.stat().st_size > 0:
-                        succeeded = True
-                        used_label = label
-                        break
-                    else:
-                        last_logs = (proc.stderr or proc.stdout or "")[-3000:]
-
-                if not succeeded:
-                    st.warning(f"{variant_name} failed under all attempts. Logs (last):")
-                    if last_logs:
-                        st.code(last_logs)
-                    continue
-
-                results.append((variant_name, out_file.read_bytes(), used_label))
-
-            if not results:
-                st.error("No variants could be produced. Check solver logs above. Ensure `solve_rota.py` supports `--seed` and reads `preferred_shifts`.")
+            # --- Build solver input workbook ---
+            wb = load_workbook(BytesIO(template.getvalue()))
+            if "Leave" not in wb.sheetnames:
+                st.error("Workbook must contain a sheet named 'Leave'.")
                 st.stop()
 
-            st.session_state["draft_results"] = results
-            st.success(f"Produced {len(results)} rota variant(s). Download below.")
-            for variant_name, data_bytes, used_label in results:
+            # Ensure preferred_shifts sheet exists
+            if "preferred_shifts" not in wb.sheetnames:
+                wb.create_sheet("preferred_shifts")
+
+            # Write Leave sheet (same structure as existing template)
+            lws = wb["Leave"]
+            for rr in range(2, 5000):
+                if lws[f"A{rr}"].value in (None, ""):
+                    break
+                for col in ("A", "B", "C", "D", "E"):
+                    lws[f"{col}{rr}"].value = None
+
+            rr = 2
+            if not leave_final.empty:
+                leave_final = leave_final.sort_values(["start_date", "consultant_name"], na_position="last")
+                for _, rec in leave_final.iterrows():
+                    lws[f"A{rr}"].value = rec["consultant_name"]
+                    lws[f"B{rr}"].value = rec["start_date"]
+                    lws[f"C{rr}"].value = rec["end_date"]
+                    lws[f"D{rr}"].value = rec["leave_type"]
+                    lws[f"E{rr}"].value = True
+                    rr += 1
+
+            # Write preferred_shifts sheet (header + rows)
+            pws = wb["preferred_shifts"]
+            pws.delete_rows(1, pws.max_row if pws.max_row else 1)
+            pws.append(["Name", "StartDate", "EndDate", "PrefKind", "ShiftType", "Weight", "Notes"])
+
+            if not pref_final.empty:
+                pref_final = pref_final.sort_values(["start_date", "consultant_name"], na_position="last")
+                for _, rec in pref_final.iterrows():
+                    pws.append([
+                        rec["consultant_name"],
+                        rec["start_date"],
+                        rec["end_date"],
+                        rec.get("pref_kind"),
+                        rec.get("shift_type"),
+                        int(rec.get("weight", 3)),
+                        rec.get("notes"),
+                    ])
+
+            # --- Run solver: produce 3 variants ---
+            with tempfile.TemporaryDirectory() as td:
+                td_path = Path(td)
+                solver_input = td_path / "Rota_Master_WITH_Leave.xlsx"
+                wb.save(solver_input)
+
+                PYTHON = sys.executable
+
+                attempts_base = []
+                attempts_base.append(("Strict", [PYTHON, "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx"]))
+                if relax_week_gap:
+                    attempts_base.append(("Relax week-gap", [PYTHON, "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx", "--no_hard_week_gap"]))
+                if relax_no_consec_weekends:
+                    attempts_base.append(("Relax no-consec-weekends", [PYTHON, "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx", "--no_hard_no_consec_weekends"]))
+                if relax_week_gap and relax_no_consec_weekends:
+                    attempts_base.append(("Relax BOTH", [PYTHON, "solve_rota.py", "--input", str(solver_input), "--output", "OUT.xlsx", "--no_hard_week_gap", "--no_hard_no_consec_weekends"]))
+
+                results_local = []  # list of (variant_name, bytes, label_used)
+                for i, seed in enumerate(variant_seeds, start=1):
+                    variant_name = f"Variant {i} (seed {seed})"
+                    out_file = td_path / f"Rota_Solved_V{i}.xlsx"
+
+                    succeeded = False
+                    used_label = None
+                    last_logs = ""
+
+                    for label, cmd in attempts_base:
+                        cmd2 = cmd.copy()
+                        cmd2[cmd2.index("OUT.xlsx")] = str(out_file)
+                        cmd2 += ["--seed", str(seed), "--period_name", period_name]
+
+                        st.write(f"Running {variant_name}: **{label}**")
+                        proc = subprocess.run(cmd2, capture_output=True, text=True)
+
+                        if proc.stdout and proc.stdout.strip():
+                            st.code(proc.stdout[-1500:])
+                        if proc.stderr and proc.stderr.strip():
+                            st.code(proc.stderr[-1500:])
+
+                        if proc.returncode == 0 and out_file.exists() and out_file.stat().st_size > 0:
+                            succeeded = True
+                            used_label = label
+                            break
+                        else:
+                            last_logs = (proc.stderr or proc.stdout or "")[-3000:]
+
+                    if not succeeded:
+                        st.warning(f"{variant_name} failed under all attempts. Logs (last):")
+                        if last_logs:
+                            st.code(last_logs)
+                        continue
+
+                    results_local.append((variant_name, out_file.read_bytes(), used_label))
+
+                if not results_local:
+                    st.error("No variants could be produced. Check solver logs above. Ensure `solve_rota.py` supports `--seed` and reads `preferred_shifts`.")
+                    st.stop()
+
+                st.session_state["draft_results"] = results_local
+                st.session_state["draft_done"] = True
+
+        st.success(f"Produced {len(st.session_state['draft_results'])} rota variant(s). Download below.")
+
+    # Always show download buttons if results are present (download clicks trigger reruns, so this MUST be outside the button).
+    results = st.session_state.get("draft_results", [])
+    if results:
+        st.markdown("#### Download drafted rota variants")
+        cols = st.columns(min(3, len(results)))
+        for idx, (variant_name, data_bytes, used_label) in enumerate(results):
+            safe_fn = f"Rota_Solved_{variant_name.replace(' ', '_').replace('(', '').replace(')', '').replace(':','')}.xlsx"
+            with cols[idx % len(cols)]:
                 st.download_button(
-                    f"Download {variant_name} — {used_label}",
+                    label=f"⬇️ {variant_name}" + (f" — {used_label}" if used_label else ""),
                     data=data_bytes,
-                    file_name=f"Rota_Solved_{variant_name.replace(' ', '_').replace('(', '').replace(')', '')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    file_name=safe_fn,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_variant_{idx}_{safe_fn}",
                 )
+
+results = st.session_state.get("draft_results", [])
 
 results = st.session_state.get("draft_results", [])
 
@@ -870,42 +966,62 @@ if len(results) >= 2:
     st.markdown("---")
     st.subheader("Visual differences between rota variants")
 
-    # Choose baseline and comparator
-    variant_names = [r[0] for r in results]
-    baseline_name = st.selectbox("Baseline variant", variant_names, index=0, key="diff_base")
-    compare_name = st.selectbox("Compare to", variant_names, index=1, key="diff_comp")
+    names = [n for (n, _, _) in results]
+    baseline_name = st.selectbox("Baseline variant", names, index=0)
+    compare_name = st.selectbox("Compare against", names, index=1)
 
     base_bytes = next(b for (n, b, _) in results if n == baseline_name)
     comp_bytes = next(b for (n, b, _) in results if n == compare_name)
 
-    sheets = common_sheets(base_bytes, comp_bytes)
-    default_sheet = "Rota" if "Rota" in sheets else sheets[0]
-    sheet = st.selectbox("Sheet to compare", sheets, index=sheets.index(default_sheet), key="diff_sheet")
+    # Sheet selection
+    try:
+        sheets = common_sheets(base_bytes, comp_bytes)
+    except Exception as e:
+        st.error(f"Could not read workbooks to compare sheets: {e}")
+        sheets = []
 
-    diffs = diff_sheet(base_bytes, comp_bytes, sheet_name=sheet, max_changes=5000)
-    s = diff_summary(diffs)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Changed cells", s["changed_cells"])
-    c2.metric("Rows affected", s["changed_rows"])
-    c3.metric("Columns affected", s["changed_cols"])
-
-    if diffs.empty:
-        st.success("No differences detected on the selected sheet.")
+    if not sheets:
+        st.info("No common sheets found between the two workbooks.")
     else:
-        with st.expander("Show where differences occur (row/column hotspots)", expanded=True):
-            colA, colB = st.columns(2)
-            with colA:
-                st.caption("Top changed rows")
-                st.dataframe(top_changed_rows(diffs, 30), width="stretch", hide_index=True)
-            with colB:
-                st.caption("Top changed columns")
-                st.dataframe(top_changed_cols(diffs, 30), width="stretch", hide_index=True)
+        default_sheet = "Rota" if "Rota" in sheets else sheets[0]
+        sheet = st.selectbox("Sheet to compare", sheets, index=sheets.index(default_sheet))
 
-        with st.expander("Cell-level differences (sample)", expanded=False):
-            st.dataframe(diffs.head(500), width="stretch", hide_index=True)
+        # comparison depth: forwarded to helper as either max_cells or max_changes depending on helper version
+        depth = st.slider("Comparison depth (cells scanned)", 1000, 50000, 8000, step=1000)
 
-        st.caption("Note: This is a generic cell-level diff. If you want an 'assignment-level' diff (e.g., "
-                   "which consultant changed on which day/shift), confirm the exact output layout of your solved "
-                   "workbook and we can parse it into structured comparisons.")
+        # Compute diffs
+        try:
+            try:
+                diffs = diff_sheet(base_bytes, comp_bytes, sheet_name=sheet, max_cells=depth)
+            except TypeError:
+                # Older helper signature
+                diffs = diff_sheet(base_bytes, comp_bytes, sheet_name=sheet, max_changes=depth)
+        except Exception as e:
+            st.error(f"Comparison failed: {e}")
+            diffs = pd.DataFrame()
 
+        # Summarise + display
+        s = diff_summary(diffs) if "diff_summary" in globals() else {"changed_cells": 0}
+
+        c1, c2, c3 = st.columns(3)
+        diffs_is_df = hasattr(diffs, "empty") and hasattr(diffs, "head")
+        diffs_len = int(len(diffs.index)) if diffs_is_df else int(len(diffs))
+
+        c1.metric("Changed cells", int(s.get("changed_cells", diffs_len)))
+        c2.metric("Baseline", baseline_name)
+        c3.metric("Compared", compare_name)
+
+        if (diffs_is_df and diffs.empty) or ((not diffs_is_df) and diffs_len == 0):
+            st.success("No differences detected (within the scanned range).")
+        else:
+            show_n = st.slider("Show first N changes", 50, 1000, 200, step=50)
+            if diffs_is_df:
+                st.dataframe(diffs.head(show_n), width="stretch", hide_index=True)
+            else:
+                st.dataframe(diffs[:show_n], width="stretch", hide_index=True)
+
+            if diffs_len > show_n:
+                st.caption(f"Showing first {show_n} changes. Increase 'Show first N changes' to see more.")
+else:
+    st.markdown("---")
+    st.info("Create at least 2 rota variants to compare visually.")

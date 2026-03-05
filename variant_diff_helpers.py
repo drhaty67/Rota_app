@@ -36,7 +36,16 @@ def common_sheets(xlsx_a: bytes, xlsx_b: bytes) -> List[str]:
     wb_b = openpyxl.load_workbook(BytesIO(xlsx_b), data_only=True)
     return [s for s in wb_a.sheetnames if s in wb_b.sheetnames]
 
-def diff_sheet(xlsx_a: bytes, xlsx_b: bytes, sheet_name: str, max_changes: int = 5000) -> pd.DataFrame:
+def diff_sheet(
+    xlsx_a: bytes,
+    xlsx_b: bytes,
+    sheet_name: str,
+    max_changes: int = 5000,
+    max_cells: int | None = None,   # <-- add this
+) -> pd.DataFrame:
+    # allow Streamlit UI to pass max_cells (alias of max_changes)
+    if max_cells is not None:
+        max_changes = int(max_cells)
     wb_a = openpyxl.load_workbook(BytesIO(xlsx_a), data_only=True)
     wb_b = openpyxl.load_workbook(BytesIO(xlsx_b), data_only=True)
 

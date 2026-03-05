@@ -1,22 +1,105 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
+import random
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple
-
-import pandas as pd
 from openpyxl import load_workbook
 from ortools.sat.python import cp_model
 
 def excel_date(v) -> Optional[date]:
-    if v is None or v == "":
+    """Coerce common Excel / openpyxl cell values to a python date.
+
+    Accepts:
+      - datetime/date
+      - Excel serial numbers (int/float)
+      - strings (YYYY-MM-DD, DD/MM/YYYY, etc.)
+    Returns None if blank/unparseable.
+    """
+    if v is None:
         return None
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s).date()
+        except Exception:
+            pass
+        try:
+            from dateutil import parser as _parser
+            return _parser.parse(s, dayfirst=True).date()
+        except Exception:
+            return None
     if isinstance(v, datetime):
         return v.date()
     if isinstance(v, date):
         return v
-    return pd.to_datetime(v).date()
+    if isinstance(v, (int, float)):
+        try:
+            return date(1899, 12, 30) + timedelta(days=int(v))
+        except Exception:
+            return None
+    return None
+
+
+def fetch_period_dates_from_supabase(period_name: str):
+    """Fetch (start_date, end_date) from Supabase public.rota_periods by name.
+
+    Expects env vars:
+      - SUPABASE_URL
+      - SUPABASE_KEY   (anon key or service role key). For server-side admin runs, service role is OK.
+    Returns (start_date: date, end_date: date).
+    """
+    import os
+    from datetime import datetime as _dt
+    try:
+        from supabase import create_client
+    except Exception as e:
+        raise RuntimeError(f"Supabase client not available: {e}. Ensure 'supabase' is in requirements.txt") from e
+
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    if not url or not key:
+        raise RuntimeError("Missing SUPABASE_URL and/or SUPABASE_KEY environment variables.")
+
+    sb = create_client(url, key)
+    resp = sb.table("rota_periods").select("start_date,end_date").eq("name", period_name).limit(1).execute()
+    data = resp.data or []
+    if not data:
+        raise RuntimeError(
+            f"No rota_periods row found with name={period_name!r}. "
+            "If you are using an ANON key, note that RLS policies often allow SELECT only to authenticated users; "
+            "use SUPABASE_SERVICE_KEY for the solver (server-side), or relax rota_periods SELECT policy for anon."
+        )
+    row = data[0]
+
+    def _to_date(v):
+        if v is None:
+            return None
+        if hasattr(v, "date") and not isinstance(v, str):
+            try:
+                return v.date()
+            except Exception:
+                pass
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            try:
+                return _dt.fromisoformat(s.replace('Z','+00:00')).date()
+            except Exception:
+                from dateutil import parser as _parser
+                return _parser.parse(s, dayfirst=True).date()
+        raise RuntimeError(f"Unparseable date from Supabase: {v!r}")
+
+    s = _to_date(row.get("start_date"))
+    e = _to_date(row.get("end_date"))
+    if not s or not e:
+        raise RuntimeError(f"rota_periods row '{period_name}' missing start_date/end_date.")
+    return s, e
+
 
 @dataclass(frozen=True)
 class Consultant:
@@ -26,7 +109,7 @@ class Consultant:
     eligible_a: bool
     eligible_d: bool
     active: bool
-    unique: str = \"\"
+    unique: str = ""
     unique_tags: frozenset[str] = frozenset()
     weekend_wte_cap: bool = False
     no_weekend: bool = False
@@ -57,18 +140,101 @@ def daterange(d0: date, d1: date) -> List[date]:
         d += timedelta(days=1)
     return out
 
-def read_inputs(path: str) -> Tuple[date, date, List[Consultant], Dict[str, Set[date]], Set[date]]:
+
+def read_preferred_shifts_from_workbook(wb) -> List[Dict]:
+    """Read preferred shifts from a sheet named 'preferred_shifts' if present.
+
+    Expected columns (header row 1):
+      consultant_name, start_date, end_date, shift_type, weight
+    shift_type mapping (from your spec):
+      A -> AB1
+      B -> AB2
+      D -> DMonThu
+      Weekend -> WeekendAB OR WeekendMixed (either satisfies)
+    """
+    prefs: List[Dict] = []
+    if "preferred_shifts" not in wb.sheetnames:
+        return prefs
+    ws = wb["preferred_shifts"]
+    # map headers
+    header = {}
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(1, c).value
+        if v is None:
+            continue
+        header[str(v).strip().lower()] = c
+
+    def col(*names):
+        for n in names:
+            if n in header:
+                return header[n]
+        return None
+
+    c_name = col("consultant_name", "consultant", "name")
+    c_s = col("start_date", "start")
+    c_e = col("end_date", "end")
+    c_t = col("shift_type", "shift")
+    c_w = col("weight", "pref_weight", "priority")
+
+    if not (c_name and c_s and c_e and c_t):
+        return prefs
+
+    for r in range(2, ws.max_row + 1):
+        nm = ws.cell(r, c_name).value
+        if nm is None or str(nm).strip() == "":
+            continue
+        sd = excel_date(ws.cell(r, c_s).value)
+        ed = excel_date(ws.cell(r, c_e).value)
+        st = ws.cell(r, c_t).value
+        if sd is None or ed is None or st is None:
+            continue
+        st_s = str(st).strip()
+        wt = 3
+        if c_w:
+            try:
+                wt = int(ws.cell(r, c_w).value or 3)
+            except Exception:
+                wt = 3
+        wt = max(1, min(5, wt))
+        prefs.append({
+            "consultant_name": str(nm).strip(),
+            "start_date": sd,
+            "end_date": ed,
+            "shift_type": st_s,
+            "weight": wt,
+        })
+    return prefs
+
+
+def read_inputs(path: str, override_start: Optional[date] = None, override_end: Optional[date] = None) -> Tuple[date, date, List[Consultant], Dict[str, Set[date]], Set[date]]:
     wb = load_workbook(path, data_only=False)
     cfg = wb["Config"]
 
-    def get_cfg(label: str) -> date:
+    # If dates were provided from Supabase, write them back into Config so downstream sheets stay consistent.
+    if override_start is not None or override_end is not None:
+        for r in range(1, 80):
+            lab = str(cfg[f"A{r}"].value).strip() if cfg[f"A{r}"].value is not None else ""
+            if lab == "CycleStartDate" and override_start is not None:
+                cfg[f"B{r}"].value = override_start
+            if lab == "CycleEndDate" and override_end is not None:
+                cfg[f"B{r}"].value = override_end
+
+
+    def get_cfg(label: str) -> Optional[date]:
         for r in range(1, 80):
             if str(cfg[f"A{r}"].value).strip() == label:
                 return excel_date(cfg[f"B{r}"].value)
         raise ValueError(f"Config label not found: {label}")
 
-    start = get_cfg("CycleStartDate")
-    end = get_cfg("CycleEndDate")
+    start = override_start or get_cfg("CycleStartDate")
+    end = override_end or get_cfg("CycleEndDate")
+    if start is None or end is None:
+        raise ValueError(
+            "CycleStartDate/CycleEndDate in the Config sheet are blank or not parseable as dates. "
+            "Please ensure Config!B cell for those labels contains a real Excel date (not text), "
+            "or an ISO date string like 2026-05-01."
+        )
+
 
     cws = wb["Consultants"]
     consultants: List[Consultant] = []
@@ -120,10 +286,12 @@ def read_inputs(path: str) -> Tuple[date, date, List[Consultant], Dict[str, Set[
         if d:
             bh.add(d)
 
-    return start, end, consultants, leave_map, bh
+    prefs = read_preferred_shifts_from_workbook(wb)
 
-def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str, Set[date]], bank_holidays: Set[date],
-          hard_no_consecutive_weekends: bool = True, hard_week_gap: bool = True, time_limit_s: int = 60) -> Dict:
+    return start, end, consultants, leave_map, bh, prefs
+
+def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str, Set[date]], bank_holidays: Set[date], prefs: List[Dict],
+          hard_no_consecutive_weekends: bool = True, hard_week_gap: bool = True, time_limit_s: int = 60, random_seed: int = 0) -> Dict:
     first_monday = start + timedelta(days=(7 - start.weekday()) % 7)
     weeks: List[date] = []
     d = first_monday
@@ -224,8 +392,12 @@ def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str
             else:
                 A_c = sum(x[(w_i,"WeekendAB",i)] * (1 if cardiac[i] else 0) for i in range(N))
             model.Add(A_c + D_c == 1)
+    # -----------------------------
+    
+    # Preferred shifts: optional scoring only (no objective terms here to avoid dependency on workbook parsing).
+    pref_items = []
 
-    # Objective: WTE-weighted fairness (total, BH, weekends)
+# Objective: WTE-weighted fairness (total, BH, weekends)
     block_weight = {"AB1":4, "AB2":4, "DMonThu":4, "WeekendAB":4, "WeekendMixed":3}
     total_duty = [model.NewIntVar(0, 20000, f"total_{i}") for i in range(N)]
     for i in range(N):
@@ -277,11 +449,72 @@ def solve(start: date, end: date, consultants: List[Consultant], leave: Dict[str
         model.Add(wkS[i] == weekend_blocks[i] * SCALE)
         model.AddAbsEquality(devW[i], wkS[i] - expected_w[i])
 
-    model.Minimize(sum(devT) + 3*sum(devBH) + 2*sum(devW))
+    
+    # -----------------------------
+    # Preference satisfaction (soft objective)
+    # -----------------------------
+    # prefs is a list of dicts with keys: consultant_name, start_date, end_date, shift_type ('A','B','D','Weekend'), weight (1..5)
+    name_to_i = {c.name.strip().lower(): i for i, c in enumerate(consultants)}
+
+    def _week_overlaps(pref_s: date, pref_e: date, wk_start: date) -> bool:
+        wk_end = wk_start + timedelta(days=6)
+        return not (pref_e < wk_start or pref_s > wk_end)
+
+    rng = random.Random(int(random_seed) if random_seed is not None else 0)
+    pref_reward_terms = []
+
+    for p_i, p in enumerate(prefs or []):
+        nm = str(p.get("consultant_name", "")).strip().lower()
+        if not nm or nm not in name_to_i:
+            continue
+        i = name_to_i[nm]
+        ps = p.get("start_date")
+        pe = p.get("end_date")
+        if ps is None or pe is None:
+            continue
+        st = str(p.get("shift_type", "")).strip()
+        if st == "":
+            continue
+        base_w = int(p.get("weight", 3) or 3)
+        base_w = max(1, min(5, base_w))
+        # Add small deterministic jitter so different seeds produce meaningfully different preference trade-offs
+        eff_w = base_w * 100 + rng.randint(0, 25)
+
+        # Determine which block type(s) satisfy the preference
+        if st.upper() == "A":
+            blocks = ["AB1"]
+        elif st.upper() == "B":
+            blocks = ["AB2"]
+        elif st.upper() == "D":
+            blocks = ["DMonThu"]
+        elif st.lower() == "weekend":
+            blocks = ["WeekendAB", "WeekendMixed"]
+        else:
+            continue
+
+        match_vars = []
+        for w_i, wk in enumerate(weeks):
+            if _week_overlaps(ps, pe, wk):
+                for b in blocks:
+                    match_vars.append(x[(w_i, b, i)])
+
+        if not match_vars:
+            continue
+
+        sat = model.NewBoolVar(f"pref_sat_{p_i}")
+        # sat == OR(match_vars)
+        model.Add(sum(match_vars) >= sat)
+        for v in match_vars:
+            model.Add(sat >= v)
+        pref_reward_terms.append(eff_w * sat)
+
+    pref_reward = sum(pref_reward_terms) if pref_reward_terms else 0
+
+    model.Minimize((sum(devT) + 3*sum(devBH) + 2*sum(devW)) - pref_reward)
 
     solver = cp_model.CpSolver()
-solver.parameters.random_seed = args.seed
-solver.parameters.randomize_search = True
+    solver.parameters.random_seed = int(random_seed)
+    solver.parameters.randomize_search = True
     solver.parameters.max_time_in_seconds = float(time_limit_s)
     solver.parameters.num_search_workers = 8
 
@@ -290,6 +523,8 @@ solver.parameters.randomize_search = True
     objective = solver.ObjectiveValue() if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) else None
 
     sol = {"status": status_name, "objective": objective, "weeks": weeks, "assignments": {wk:{} for wk in weeks}}
+    sol["pref_score"] = None
+
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         for w_i, wk in enumerate(weeks):
             for b in block_types:
@@ -297,36 +532,56 @@ solver.parameters.randomize_search = True
                     if solver.Value(x[(w_i,b,i)]) == 1:
                         sol["assignments"][wk][b] = names[i]
                         break
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        # Simple preference score: sum(weight) for satisfied prefers minus satisfied avoids
+        score = 0
+        for p in pref_items:
+            i = p["i"]
+            name = names[i]
+            for wk in p["weeks"]:
+                asg = sol["assignments"].get(wk, {})
+                hit = any(asg.get(b, "") == name for b in p["blocks"])
+                if hit:
+                    score += (p["weight"] if p["sign"] == 1 else -p["weight"])
+        sol["pref_score"] = int(score)
     return sol
 
-def export_to_excel(input_path: str, output_path: str, sol: Dict):
+def export_to_excel(input_path: str, output_path: str, sol: Dict, override_start: Optional[date] = None, override_end: Optional[date] = None):
     wb = load_workbook(input_path)
-# -----------------------------
-# Read preferred_shifts (soft constraints)
-# -----------------------------
-preferred = []
-if 'preferred_shifts' in wb.sheetnames:
-    pws = wb['preferred_shifts']
-    for row in pws.iter_rows(min_row=2, values_only=True):
-        if not row or not row[0]:
-            continue
-        name, sd, ed, kind, shift_type, weight, notes = row
-        try:
-            weight = int(weight) if weight is not None else 3
-        except Exception:
-            weight = 3
-        preferred.append({
-            'name': name,
-            'start_date': sd,
-            'end_date': ed,
-            'shift': shift_type,
-            'weight': weight
-        })
+
+    # -----------------------------
+    # Read preferred_shifts (currently recorded for future scoring; not enforced in this solver version)
+    # -----------------------------
+    preferred = []
+    if "preferred_shifts" in wb.sheetnames:
+        pws = wb["preferred_shifts"]
+        for row in pws.iter_rows(min_row=2, values_only=True):
+            if not row or not row[0]:
+                continue
+            # Expected columns: name, start_date, end_date, kind, shift_type, weight, notes
+            name, sd, ed, kind, shift_type, weight, notes = (list(row) + [None]*7)[:7]
+            try:
+                weight = int(weight) if weight is not None else 3
+            except Exception:
+                weight = 3
+            preferred.append(
+                {"name": str(name), "start_date": sd, "end_date": ed, "shift": shift_type, "weight": weight}
+            )
 
     wa = wb["WeekAssignments"]
     rota = wb["Rota"]
     dash = wb["Dashboard"]
     cfg = wb["Config"]
+
+    # If dates were provided from Supabase, write them back into Config so downstream sheets stay consistent.
+    if override_start is not None or override_end is not None:
+        for r in range(1, 80):
+            lab = str(cfg[f"A{r}"].value).strip() if cfg[f"A{r}"].value is not None else ""
+            if lab == "CycleStartDate" and override_start is not None:
+                cfg[f"B{r}"].value = override_start
+            if lab == "CycleEndDate" and override_end is not None:
+                cfg[f"B{r}"].value = override_end
+
     cons = wb["Consultants"]
     leave_ws = wb["Leave"]
     bh_ws = wb["BankHolidays"]
@@ -340,10 +595,8 @@ if 'preferred_shifts' in wb.sheetnames:
     start = excel_date(get_cfg("CycleStartDate"))
     end = excel_date(get_cfg("CycleEndDate"))
 
-    # A previous-day A for B(start) (if needed)
     prev_A_for_start = str(get_cfg("A_Consultant_DayBeforeStart") or "")
 
-    # cardiac & wte maps
     cardiac = {}
     wte = {}
     for r in range(2, 1000):
@@ -354,7 +607,6 @@ if 'preferred_shifts' in wb.sheetnames:
         cardiac[nm] = bool(cons[f"B{r}"].value)
         wte[nm] = float(cons[f"C{r}"].value or 0.0)
 
-    # leave map
     leave_map = {}
     for r in range(2, 5000):
         nm = leave_ws[f"A{r}"].value
@@ -367,13 +619,12 @@ if 'preferred_shifts' in wb.sheetnames:
         if not s or not e:
             continue
         nm = str(nm)
-        leave_map.setdefault(nm,set())
+        leave_map.setdefault(nm, set())
         d = s
         while d <= e:
             leave_map[nm].add(d)
             d += timedelta(days=1)
 
-    # BH set
     bh_set = set()
     for r in range(2, 2000):
         d = excel_date(bh_ws[f"A{r}"].value)
@@ -381,29 +632,30 @@ if 'preferred_shifts' in wb.sheetnames:
             bh_set.add(d)
 
     # Clear WeekAssignments
-    for r in range(2, wa.max_row+1):
+    for r in range(2, wa.max_row + 1):
         for c in range(1, 9):
-            wa.cell(r,c).value = None
+            wa.cell(r, c).value = None
 
     weeks = sol["weeks"]
     for r_i, wk in enumerate(weeks, start=2):
-        wa.cell(r_i,1).value = wk
-        wa.cell(r_i,2).value = sol["assignments"][wk].get("AB1","")
-        wa.cell(r_i,3).value = sol["assignments"][wk].get("AB2","")
-        wa.cell(r_i,4).value = sol["assignments"][wk].get("DMonThu","")
-        wa.cell(r_i,5).value = sol["assignments"][wk].get("WeekendAB","")
-        wa.cell(r_i,6).value = sol["assignments"][wk].get("WeekendMixed","")
-        wa.cell(r_i,7).value = sol.get("status","")
-        wa.cell(r_i,8).value = sol.get("objective","")
+        wa.cell(r_i, 1).value = wk
+        wa.cell(r_i, 2).value = sol["assignments"][wk].get("AB1", "")
+        wa.cell(r_i, 3).value = sol["assignments"][wk].get("AB2", "")
+        wa.cell(r_i, 4).value = sol["assignments"][wk].get("DMonThu", "")
+        wa.cell(r_i, 5).value = sol["assignments"][wk].get("WeekendAB", "")
+        wa.cell(r_i, 6).value = sol["assignments"][wk].get("WeekendMixed", "")
+        wa.cell(r_i, 7).value = sol.get("status", "")
+        wa.cell(r_i, 8).value = sol.get("objective", "")
 
     wk_map = {wk: sol["assignments"][wk] for wk in weeks}
+
     def week_monday(d: date) -> date:
         return d - timedelta(days=d.weekday())
 
     # Clear Rota
-    for r in range(2, rota.max_row+1):
+    for r in range(2, rota.max_row + 1):
         for c in range(1, 7):
-            rota.cell(r,c).value = None
+            rota.cell(r, c).value = None
 
     all_days = daterange(start, end)
     prev_A = None
@@ -412,16 +664,16 @@ if 'preferred_shifts' in wb.sheetnames:
         wk = week_monday(d)
         asg = wk_map.get(wk, {})
 
-        if dow in (0,2):      # Mon/Wed
-            A = asg.get("AB1","")
-        elif dow in (1,3):    # Tue/Thu
-            A = asg.get("AB2","")
-        elif dow == 4:        # Fri
-            A = asg.get("WeekendAB","")
-        elif dow == 5:        # Sat
-            A = asg.get("WeekendMixed","")
-        else:                 # Sun
-            A = asg.get("WeekendAB","")
+        if dow in (0, 2):  # Mon/Wed
+            A = asg.get("AB1", "")
+        elif dow in (1, 3):  # Tue/Thu
+            A = asg.get("AB2", "")
+        elif dow == 4:  # Fri
+            A = asg.get("WeekendAB", "")
+        elif dow == 5:  # Sat
+            A = asg.get("WeekendMixed", "")
+        else:  # Sun
+            A = asg.get("WeekendAB", "")
 
         if d == start:
             B = prev_A_for_start
@@ -429,21 +681,28 @@ if 'preferred_shifts' in wb.sheetnames:
             B = prev_A or ""
 
         if dow <= 3:
-            D = asg.get("DMonThu","")
+            D = asg.get("DMonThu", "")
         elif dow == 4:
-            D = asg.get("WeekendMixed","")
+            D = asg.get("WeekendMixed", "")
         else:
-            D = ""
+            D = ""  # No D at weekends
 
         flags = []
-        if not A: flags.append("MISSING_A")
-        if not B: flags.append("MISSING_B")
-        if dow <= 4 and not D: flags.append("MISSING_D")
-        if dow >= 5 and D: flags.append("D_SHOULD_BE_BLANK_WEEKEND")
+        if not A:
+            flags.append("MISSING_A")
+        if not B:
+            flags.append("MISSING_B")
+        if dow <= 4 and not D:
+            flags.append("MISSING_D")
+        if dow >= 5 and D:
+            flags.append("D_SHOULD_BE_BLANK_WEEKEND")
 
-        if A and d in leave_map.get(A,set()): flags.append("A_ON_LEAVE")
-        if B and d in leave_map.get(B,set()): flags.append("B_ON_LEAVE")
-        if D and d in leave_map.get(D,set()): flags.append("D_ON_LEAVE")
+        if A and d in leave_map.get(A, set()):
+            flags.append("A_ON_LEAVE")
+        if B and d in leave_map.get(B, set()):
+            flags.append("B_ON_LEAVE")
+        if D and d in leave_map.get(D, set()):
+            flags.append("D_ON_LEAVE")
 
         if dow <= 4:
             a_c = bool(cardiac.get(A, False))
@@ -454,96 +713,118 @@ if 'preferred_shifts' in wb.sheetnames:
         if d in bh_set:
             flags.append("BANK_HOLIDAY")
 
-        rota.cell(row_i,1).value = d
-        rota.cell(row_i,2).value = d.strftime("%a")
-        rota.cell(row_i,3).value = A
-        rota.cell(row_i,4).value = B
-        rota.cell(row_i,5).value = D
-        rota.cell(row_i,6).value = ",".join(flags)
+        rota.cell(row_i, 1).value = d
+        rota.cell(row_i, 2).value = d.strftime("%a")
+        rota.cell(row_i, 3).value = A
+        rota.cell(row_i, 4).value = B
+        rota.cell(row_i, 5).value = D
+        rota.cell(row_i, 6).value = ",".join(flags)
 
         prev_A = A
 
     # Dashboard (values)
-    # Clear
-    for r in range(2, dash.max_row+1):
+    for r in range(2, dash.max_row + 1):
         for c in range(1, 14):
-            dash.cell(r,c).value = None
+            dash.cell(r, c).value = None
 
-    counts = {nm: {"A":0,"B":0,"D":0,"BH":0,"wknd":0,"consec_wknd":0} for nm in cardiac.keys()}
+    counts = {nm: {"A": 0, "B": 0, "D": 0, "BH": 0, "wknd": 0, "consec_wknd": 0} for nm in cardiac.keys()}
     weekend_by_cons = {nm: [] for nm in cardiac.keys()}
     for wk in weeks:
-        for b in ("WeekendAB","WeekendMixed"):
-            nm = wk_map[wk].get(b,"")
+        for b in ("WeekendAB", "WeekendMixed"):
+            nm = wk_map[wk].get(b, "")
             if nm:
                 weekend_by_cons.setdefault(nm, []).append(wk)
-    for nm,wks in weekend_by_cons.items():
+
+    for nm, wks in weekend_by_cons.items():
         wks = sorted(wks)
-        for i in range(len(wks)-1):
-            if (wks[i+1] - wks[i]).days == 7:
+        for i in range(len(wks) - 1):
+            if (wks[i + 1] - wks[i]).days == 7:
                 counts[nm]["consec_wknd"] += 1
         counts[nm]["wknd"] = len(wks)
 
     for row_i, d in enumerate(all_days, start=2):
-        A = rota.cell(row_i,3).value or ""
-        B = rota.cell(row_i,4).value or ""
-        Dv = rota.cell(row_i,5).value or ""
-        is_bh = "BANK_HOLIDAY" in (rota.cell(row_i,6).value or "")
-        if A in counts: counts[A]["A"] += 1
-        if B in counts: counts[B]["B"] += 1
-        if Dv in counts and d.weekday() <= 4: counts[Dv]["D"] += 1
+        A = rota.cell(row_i, 3).value or ""
+        B = rota.cell(row_i, 4).value or ""
+        Dv = rota.cell(row_i, 5).value or ""
+        is_bh = "BANK_HOLIDAY" in (rota.cell(row_i, 6).value or "")
+        if A in counts:
+            counts[A]["A"] += 1
+        if B in counts:
+            counts[B]["B"] += 1
+        if Dv in counts and d.weekday() <= 4:
+            counts[Dv]["D"] += 1
         if is_bh:
-            if A in counts: counts[A]["BH"] += 1
-            if B in counts: counts[B]["BH"] += 1
-            if Dv in counts and d.weekday() <= 4: counts[Dv]["BH"] += 1
+            if A in counts:
+                counts[A]["BH"] += 1
+            if B in counts:
+                counts[B]["BH"] += 1
+            if Dv in counts and d.weekday() <= 4:
+                counts[Dv]["BH"] += 1
 
-    total_all = sum(v["A"]+v["B"]+v["D"] for v in counts.values())
+    total_all = sum(v["A"] + v["B"] + v["D"] for v in counts.values())
     total_bh = sum(v["BH"] for v in counts.values())
     sum_wte = sum(wte.values()) if wte else 1.0
 
     r = 2
     for nm in sorted(counts.keys()):
-        A_cnt = counts[nm]["A"]; B_cnt = counts[nm]["B"]; D_cnt = counts[nm]["D"]
+        A_cnt = counts[nm]["A"]
+        B_cnt = counts[nm]["B"]
+        D_cnt = counts[nm]["D"]
         tot = A_cnt + B_cnt + D_cnt
-        exp = total_all * (wte.get(nm,0.0)/sum_wte)
+        exp = total_all * (wte.get(nm, 0.0) / sum_wte)
         delta = tot - exp
         bh_cnt = counts[nm]["BH"]
-        bh_exp = total_bh * (wte.get(nm,0.0)/sum_wte)
+        bh_exp = total_bh * (wte.get(nm, 0.0) / sum_wte)
         bh_delta = bh_cnt - bh_exp
-        dash.cell(r,1).value = nm
-        dash.cell(r,2).value = wte.get(nm,0.0)
-        dash.cell(r,3).value = A_cnt
-        dash.cell(r,4).value = B_cnt
-        dash.cell(r,5).value = D_cnt
-        dash.cell(r,6).value = tot
-        dash.cell(r,7).value = exp
-        dash.cell(r,8).value = delta
-        dash.cell(r,9).value = bh_cnt
-        dash.cell(r,10).value = bh_exp
-        dash.cell(r,11).value = bh_delta
-        dash.cell(r,12).value = counts[nm]["wknd"]
-        dash.cell(r,13).value = counts[nm]["consec_wknd"]
+
+        dash.cell(r, 1).value = nm
+        dash.cell(r, 2).value = wte.get(nm, 0.0)
+        dash.cell(r, 3).value = A_cnt
+        dash.cell(r, 4).value = B_cnt
+        dash.cell(r, 5).value = D_cnt
+        dash.cell(r, 6).value = tot
+        dash.cell(r, 7).value = exp
+        dash.cell(r, 8).value = delta
+        dash.cell(r, 9).value = bh_cnt
+        dash.cell(r, 10).value = bh_exp
+        dash.cell(r, 11).value = bh_delta
+        dash.cell(r, 12).value = counts[nm]["wknd"]
+        dash.cell(r, 13).value = counts[nm]["consec_wknd"]
         r += 1
 
     wb.save(output_path)
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--output", required=True)
     ap.add_argument("--time_limit", type=int, default=60)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--period_name", type=str, default="")  # reads dates from Supabase rota_periods.name
     ap.add_argument("--no_hard_week_gap", action="store_true")
     ap.add_argument("--no_hard_no_consec_weekends", action="store_true")
     args = ap.parse_args()
 
-    start, end, consultants, leave, bh = read_inputs(args.input)
+    override_start = None
+    override_end = None
+    if args.period_name:
+        override_start, override_end = fetch_period_dates_from_supabase(args.period_name)
+
+    try:
+        start, end, consultants, leave, bh, prefs = read_inputs(args.input, override_start=override_start, override_end=override_end)
+    except Exception as e:
+        raise SystemExit(f"Input workbook error: {e}")
     sol = solve(
         start, end, consultants, leave, bh,
+        prefs,
         hard_no_consecutive_weekends=not args.no_hard_no_consec_weekends,
         hard_week_gap=not args.no_hard_week_gap,
         time_limit_s=args.time_limit,
+        random_seed=args.seed,
     )
     print(f"Status: {sol['status']}  Objective: {sol.get('objective')}")
-    export_to_excel(args.input, args.output, sol)
+    export_to_excel(args.input, args.output, sol, override_start=override_start, override_end=override_end)
     print(f"Wrote {args.output}")
 
 if __name__ == "__main__":
