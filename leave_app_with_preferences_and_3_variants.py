@@ -922,13 +922,13 @@ if len(results) >= 2:
     st.markdown("---")
     st.subheader("Visual differences between rota variants")
 
-    # Guard: need at least 2 results
-    if "results" not in globals() or results is None or len(results) < 2:
-    st.info("Create at least 2 rota variants to compare.")
-    else:
     names = [n for (n, _, _) in results]
+
     baseline_name = st.selectbox("Baseline variant", names, index=0)
-    compare_name = st.selectbox("Compare against", names, index=1 if len(names) > 1 else 0)
+    compare_name = st.selectbox(
+        "Compare against", names,
+        index=1 if len(names) > 1 else 0
+    )
 
     base_bytes = next(b for (n, b, _) in results if n == baseline_name)
     comp_bytes = next(b for (n, b, _) in results if n == compare_name)
@@ -943,18 +943,36 @@ if len(results) >= 2:
         st.info("No common sheets found between the two workbooks.")
     else:
         default_sheet = "Rota" if "Rota" in sheets else sheets[0]
-        sheet = st.selectbox("Sheet to compare", sheets, index=sheets.index(default_sheet))
 
-        max_cells = st.slider("Comparison depth (cells scanned)", 1000, 50000, 8000, step=1000)
+        sheet = st.selectbox(
+            "Sheet to compare",
+            sheets,
+            index=sheets.index(default_sheet)
+        )
+
+        max_cells = st.slider(
+            "Comparison depth (cells scanned)",
+            1000,
+            50000,
+            8000,
+            step=1000
+        )
 
         try:
-            diffs = diff_sheet(base_bytes, comp_bytes, sheet_name=sheet, max_cells=max_cells)
+            diffs = diff_sheet(
+                base_bytes,
+                comp_bytes,
+                sheet_name=sheet,
+                max_cells=max_cells
+            )
             s = diff_summary(diffs)
         except Exception as e:
             st.error(f"Comparison failed: {e}")
-            diffs, s = [], {"changed_cells": 0}
+            diffs = []
+            s = {"changed_cells": 0}
 
         c1, c2, c3 = st.columns(3)
+
         c1.metric("Changed cells", s.get("changed_cells", len(diffs)))
         c2.metric("Baseline", baseline_name)
         c3.metric("Compared", compare_name)
@@ -962,8 +980,22 @@ if len(results) >= 2:
         if not diffs:
             st.success("No differences detected (within the scanned range).")
         else:
-            # show first N diffs
-            show_n = st.slider("Show first N changes", 50, 1000, 200, step=50)
-            st.dataframe(diffs[:show_n], width="stretch", hide_index=True)
+            show_n = st.slider(
+                "Show first N changes",
+                50,
+                1000,
+                200,
+                step=50
+            )
+
+            st.dataframe(
+                diffs[:show_n],
+                width="stretch",
+                hide_index=True
+            )
+
             if len(diffs) > show_n:
-                st.caption(f"Showing first {show_n} changes. Increase 'Show first N changes' to see more.")
+                st.caption(
+                    f"Showing first {show_n} changes. "
+                    "Increase 'Show first N changes' to see more."
+                )
