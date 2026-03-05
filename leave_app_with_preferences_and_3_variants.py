@@ -964,35 +964,34 @@ if len(results) >= 2:
             8000,
             step=1000
         )
-
+try:
+        # Support both helper signatures:
+        # - diff_sheet(..., max_cells=...)
+        # - diff_sheet(..., max_changes=...)
+        
         try:
-    # Support both helper signatures:
-    # - diff_sheet(..., max_cells=...)
-    # - diff_sheet(..., max_changes=...)
+            diffs = diff_sheet(
+                base_bytes,
+                comp_bytes,
+                sheet_name=sheet,
+                max_cells=max_cells
+            )
+        except TypeError as te:
+            # Fallback to older helper API
+            diffs = diff_sheet(
+                base_bytes,
+                comp_bytes,
+                sheet_name=sheet,
+                max_changes=max_cells
+            )
     
-    try:
-        diffs = diff_sheet(
-            base_bytes,
-            comp_bytes,
-            sheet_name=sheet,
-            max_cells=max_cells
-        )
-    except TypeError as te:
-        # Fallback to older helper API
-        diffs = diff_sheet(
-            base_bytes,
-            comp_bytes,
-            sheet_name=sheet,
-            max_changes=max_cells
-        )
+        s = diff_summary(diffs)
 
-    s = diff_summary(diffs)
-
-except Exception as e:
-    st.error(f"Comparison failed: {e}")
-    # Keep type consistent with the common helper behaviour (DataFrame)
-    diffs = pd.DataFrame()
-    s = {"changed_cells": 0}
+    except Exception as e:
+        st.error(f"Comparison failed: {e}")
+        # Keep type consistent with the common helper behaviour (DataFrame)
+        diffs = pd.DataFrame()
+        s = {"changed_cells": 0}
 
         c1, c2, c3 = st.columns(3)
 
