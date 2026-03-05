@@ -837,7 +837,7 @@ else:
                     cmd2 = cmd.copy()
                     # Replace output placeholder
                     cmd2[cmd2.index("OUT.xlsx")] = str(out_file)
-                    cmd2 += ["--seed", str(seed), "--period_name", name]
+                    cmd2 += ["--seed", str(seed), "--period_name", "name"]
 
                     st.write(f"Running {variant_name}: **{label}**")
                     proc = subprocess.run(cmd2, capture_output=True, text=True)
