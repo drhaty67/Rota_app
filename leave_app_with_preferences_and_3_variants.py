@@ -16,6 +16,20 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# --- Variant diff helpers (for comparing solved rota variants) ---
+try:
+    # If variant_diff_helpers.py is in the repo root, this should work
+    from variant_diff_helpers import common_sheets  # type: ignore
+except Exception:
+    # Fallback: compute common sheet names directly from bytes
+    def common_sheets(base_bytes: bytes, comp_bytes: bytes):
+        import io
+        import openpyxl
+
+        wb1 = openpyxl.load_workbook(io.BytesIO(base_bytes), data_only=False)
+        wb2 = openpyxl.load_workbook(io.BytesIO(comp_bytes), data_only=False)
+        return sorted(set(wb1.sheetnames).intersection(set(wb2.sheetnames)))
+
 # --- Supabase email confirmation / magic link handler ---
 query_params = st.query_params
 
